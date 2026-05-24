@@ -2,7 +2,7 @@ import { z } from "zod";
 import { writeFile } from "fs/promises";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
-import { closeBrowser, getPage } from "./browser.js";
+import { closeBrowser, getPage, setHeadless, isHeadless, pressKey, scrollPage, scrollToTop, scrollToBottom, hoverElement, goBack, goForward, reload } from "./browser.js";
 
 type ToolHandler<T extends z.ZodRawShape> = (args: z.infer<z.ZodObject<T>>) => Promise<unknown>;
 
@@ -28,6 +28,17 @@ const SearchEngines = {
 } as const;
 
 const tools = [
+  createTool({
+    name: "browser_set_headless",
+    description: "Set whether browser runs in headless mode. Use true for automation/testing, false to see the browser window.",
+    schema: {
+      headless: z.boolean().describe("true = headless (no visible window), false = show browser window"),
+    },
+    handler: async ({ headless }) => {
+      setHeadless(headless);
+      return success({ headless, current: isHeadless() });
+    },
+  }),
   createTool({
     name: "browser_navigate",
     description: "Go to a URL. Use this first to load a webpage before taking actions. Supports any HTTP/HTTPS URL.",
@@ -177,6 +188,85 @@ const tools = [
       });
       await writeFile(filepath, pdf);
       return success({ filepath, size: pdf.length });
+    },
+  }),
+  createTool({
+    name: "browser_press",
+    description: "Press a keyboard key. Use for Enter, Tab, Escape, Arrow keys, etc.",
+    schema: {
+      key: z.string().describe("Key to press: Enter, Tab, Escape, ArrowUp, ArrowDown, ArrowLeft, ArrowRight, Backspace, Delete, etc."),
+    },
+    handler: async ({ key }) => {
+      await pressKey(key);
+      return success({ key });
+    },
+  }),
+  createTool({
+    name: "browser_scroll",
+    description: "Scroll the page by x/y pixels. Positive values scroll down/right, negative scroll up/left.",
+    schema: {
+      x: z.number().default(0).describe("Horizontal scroll amount in pixels (positive = right, negative = left)"),
+      y: z.number().describe("Vertical scroll amount in pixels (positive = down, negative = up)"),
+    },
+    handler: async ({ x, y }) => {
+      await scrollPage(x, y);
+      return success({ x, y });
+    },
+  }),
+  createTool({
+    name: "browser_scroll_to_top",
+    description: "Scroll to the top of the page.",
+    schema: {},
+    handler: async () => {
+      await scrollToTop();
+      return success({});
+    },
+  }),
+  createTool({
+    name: "browser_scroll_to_bottom",
+    description: "Scroll to the bottom of the page.",
+    schema: {},
+    handler: async () => {
+      await scrollToBottom();
+      return success({});
+    },
+  }),
+  createTool({
+    name: "browser_hover",
+    description: "Hover over an element. Useful for dropdowns, tooltips, and menus that appear on hover.",
+    schema: {
+      selector: z.string().describe("CSS selector of the element to hover over"),
+    },
+    handler: async ({ selector }) => {
+      await hoverElement(selector);
+      return success({});
+    },
+  }),
+  createTool({
+    name: "browser_go_back",
+    description: "Navigate back to the previous page in browser history.",
+    schema: {},
+    handler: async () => {
+      await goBack();
+      return success({});
+    },
+  }),
+  createTool({
+    name: "browser_go_forward",
+    description: "Navigate forward in browser history.",
+    schema: {},
+    handler: async () => {
+      await goForward();
+      return success({});
+    },
+  }),
+  createTool({
+    name: "browser_reload",
+    description: "Reload the current page.",
+    schema: {},
+    handler: async () => {
+      await reload();
+      return success({});
     },
   }),
 ];
