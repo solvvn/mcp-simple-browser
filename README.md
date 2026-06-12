@@ -96,6 +96,16 @@ Add to your Claude Desktop config:
 | `browser_search` | Search the web (Google, DuckDuckGo, Bing) |
 | `browser_wait` | Wait for specified milliseconds |
 | `browser_print_to_pdf` | Print page to PDF |
+| `browser_press` | Press a keyboard key |
+| `browser_scroll` | Scroll page by pixel offset |
+| `browser_scroll_to_top` | Scroll to the top of the page |
+| `browser_scroll_to_bottom` | Scroll to the bottom of the page |
+| `browser_hover` | Hover over an element |
+| `browser_go_back` | Navigate back in browser history |
+| `browser_go_forward` | Navigate forward in browser history |
+| `browser_reload` | Reload the current page |
+| `browser_run_flow` | Run a complete multi-step browser workflow in one call |
+| `browser_run_automation` | Backward-compatible alias of `browser_run_flow` |
 | `browser_close` | Close browser and cleanup |
 
 ## Examples
@@ -128,6 +138,82 @@ await browser_type({ selector: "input[name='q']", text: "hello" })
 
 // Click a button
 await browser_click({ selector: "button[type='submit']" })
+```
+
+### One-call Browser Workflow
+
+```javascript
+await browser_run_flow({
+  steps: [
+    { action: "navigate", url: "https://example.com/login" },
+    { action: "waitForSelector", selector: "form" },
+    { action: "type", selector: "input[name='email']", text: "demo@example.com" },
+    { action: "type", selector: "input[name='password']", text: "secret123" },
+    { action: "click", selector: "button[type='submit']" },
+    { action: "assertVisible", selector: ".dashboard", timeout: 10000 },
+    { action: "assertText", selector: "body", text: "Welcome", match: "includes" },
+    { action: "extractText", selector: ".dashboard h1", variable: "heading" },
+    { action: "screenshot", filepath: "/tmp/login-success.png", fullPage: true }
+  ]
+})
+```
+
+Supported `action` values:
+
+- `navigate`
+- `click`
+- `type`
+- `clear`
+- `focus`
+- `selectOption`
+- `check`
+- `uncheck`
+- `press`
+- `wait`
+- `waitForSelector`
+- `waitForNavigation`
+- `hover`
+- `scroll`
+- `scrollToTop`
+- `scrollToBottom`
+- `extractText`
+- `extractHtml`
+- `extractAttribute`
+- `assertText`
+- `assertVisible`
+- `assertUrl`
+- `evaluate`
+- `screenshot`
+
+### Example: Scraping in One Call
+
+```javascript
+await browser_run_flow({
+  steps: [
+    { action: "navigate", url: "https://example.com/products" },
+    { action: "waitForSelector", selector: ".product-card" },
+    { action: "extractText", selector: "h1", variable: "pageTitle" },
+    { action: "extractAttribute", selector: ".product-card a", attribute: "href", variable: "firstProductUrl" },
+    { action: "screenshot", filepath: "/tmp/products.png", fullPage: true }
+  ]
+})
+```
+
+### Example: Form Flow in One Call
+
+```javascript
+await browser_run_flow({
+  steps: [
+    { action: "navigate", url: "https://example.com/signup" },
+    { action: "type", selector: "#name", text: "Jane Doe" },
+    { action: "type", selector: "#email", text: "jane@example.com" },
+    { action: "selectOption", selector: "#country", selectedValue: "us" },
+    { action: "check", selector: "#terms" },
+    { action: "click", selector: "button[type='submit']" },
+    { action: "waitForNavigation", waitUntil: "networkidle", timeout: 10000 },
+    { action: "assertUrl", text: "/welcome", match: "includes" }
+  ]
+})
 ```
 
 ## Development

@@ -27,6 +27,319 @@ const SearchEngines = {
   bing: (q: string) => `https://www.bing.com/search?q=${q}`,
 } as const;
 
+const waitUntilSchema = z
+  .enum(["load", "domcontentloaded", "networkidle", "commit"])
+  .default("networkidle");
+
+const automationStepSchema = z
+  .object({
+    action: z
+      .enum([
+        "navigate",
+        "click",
+        "type",
+        "clear",
+        "focus",
+        "selectOption",
+        "check",
+        "uncheck",
+        "press",
+        "wait",
+        "waitForSelector",
+        "waitForNavigation",
+        "hover",
+        "scroll",
+        "scrollToTop",
+        "scrollToBottom",
+        "extractText",
+        "extractHtml",
+        "extractAttribute",
+        "assertText",
+        "assertVisible",
+        "assertUrl",
+        "evaluate",
+        "screenshot",
+      ])
+      .describe("Action to execute in the current browser session"),
+    name: z.string().optional().describe("Optional label for easier debugging"),
+    selector: z.string().optional().describe("CSS selector used by the action"),
+    url: z.string().optional().describe("Target URL for navigate"),
+    text: z.string().optional().describe("Input text or expected text depending on action"),
+    key: z.string().optional().describe("Keyboard key for press"),
+    milliseconds: z.number().optional().describe("Delay in milliseconds for wait"),
+    delay: z.number().default(50).describe("Delay between keystrokes for type"),
+    timeout: z.number().default(5000).describe("Timeout in milliseconds"),
+    waitUntil: waitUntilSchema.describe("Navigation wait strategy"),
+    fullPage: z.boolean().default(false).describe("Capture full page for screenshot"),
+    filepath: z.string().optional().describe("Absolute path for saved screenshot"),
+    x: z.number().default(0).describe("Horizontal scroll amount"),
+    y: z.number().default(0).describe("Vertical scroll amount"),
+    script: z.string().optional().describe("JavaScript to run inside browser context"),
+    variable: z.string().optional().describe("Store the step result under this key"),
+    attribute: z.string().optional().describe("Attribute name for extractAttribute"),
+    match: z
+      .enum(["equals", "includes", "regex"])
+      .default("includes")
+      .describe("Comparison mode for assertText or assertUrl"),
+    selectedValue: z.string().optional().describe("Value to select for selectOption"),
+    continueOnError: z.boolean().default(false).describe("Continue even if this step fails"),
+  })
+  .superRefine((step, ctx) => {
+    const requireField = (field: keyof typeof step, message: string) => {
+      if (step[field] === undefined || step[field] === "") {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, message, path: [field] });
+      }
+    };
+
+    switch (step.action) {
+      case "navigate":
+        requireField("url", "url is required for navigate");
+        break;
+      case "click":
+      case "hover":
+      case "waitForSelector":
+      case "assertVisible":
+      case "extractHtml":
+      case "clear":
+      case "focus":
+      case "check":
+      case "uncheck":
+        requireField("selector", `selector is required for ${step.action}`);
+        break;
+      case "type":
+        requireField("selector", "selector is required for type");
+        requireField("text", "text is required for type");
+        break;
+      case "selectOption":
+        requireField("selector", "selector is required for selectOption");
+        requireField("selectedValue", "selectedValue is required for selectOption");
+        break;
+      case "press":
+        requireField("key", "key is required for press");
+        break;
+      case "wait":
+        requireField("milliseconds", "milliseconds is required for wait");
+        break;
+      case "waitForNavigation":
+        break;
+      case "scroll":
+        requireField("y", "y is required for scroll");
+        break;
+      case "extractAttribute":
+        requireField("selector", "selector is required for extractAttribute");
+        requireField("attribute", "attribute is required for extractAttribute");
+        break;
+      case "assertText":
+        requireField("text", "text is required for assertText");
+        break;
+      case "assertUrl":
+        requireField("text", "text is required for assertUrl");
+        break;
+      case "evaluate":
+        requireField("script", "script is required for evaluate");
+        break;
+      case "screenshot":
+        requireField("filepath", "filepath is required for screenshot");
+        break;
+      default:
+        break;
+    }
+  });
+
+function createStepLabel(step: z.infer<typeof automationStepSchema>, index: number): string {
+  return step.name || `${index + 1}:${step.action}`;
+}
+
+function textMatches(actual: string, expected: string, match: "equals" | "includes" | "regex"): boolean {
+  if (match === "equals") return actual === expected;
+  if (match === "regex") return new RegExp(expected).test(actual);
+  return actual.includes(expected);
+}
+
+function toLoadState(waitUntil: z.infer<typeof waitUntilSchema>): "load" | "domcontentloaded" | "networkidle" {
+  return waitUntil === "commit" ? "domcontentloaded" : waitUntil;
+}
+
+async function runBrowserFlow(
+  steps: Array<z.infer<typeof automationStepSchema>>,
+  stopOnError: boolean,
+) {
+  const page = await getPage();
+  const variables: Record<string, unknown> = {};
+  const results: Array<Record<string, unknown>> = [];
+
+  for (const [index, step] of steps.entries()) {
+    const label = createStepLabel(step, index);
+
+    try {
+      let value: unknown = null;
+
+      switch (step.action) {
+        case "navigate":
+          await page.goto(step.url!, { waitUntil: step.waitUntil });
+          value = { url: page.url(), title: await page.title() };
+          break;
+        case "click":
+          await page.click(step.selector!);
+          value = { clicked: step.selector };
+          break;
+        case "type":
+          await page.type(step.selector!, step.text!, { delay: step.delay });
+          value = { typed: step.selector, length: step.text!.length };
+          break;
+        case "clear":
+          await page.locator(step.selector!).clear();
+          value = { cleared: step.selector };
+          break;
+        case "focus":
+          await page.focus(step.selector!);
+          value = { focused: step.selector };
+          break;
+        case "selectOption": {
+          const selected = await page.selectOption(step.selector!, step.selectedValue!);
+          value = { selector: step.selector, selected };
+          break;
+        }
+        case "check":
+          await page.check(step.selector!);
+          value = { checked: step.selector };
+          break;
+        case "uncheck":
+          await page.uncheck(step.selector!);
+          value = { unchecked: step.selector };
+          break;
+        case "press":
+          await pressKey(step.key!);
+          value = { key: step.key };
+          break;
+        case "wait":
+          await new Promise((resolve) => setTimeout(resolve, step.milliseconds));
+          value = { waited: step.milliseconds };
+          break;
+        case "waitForSelector":
+          await page.waitForSelector(step.selector!, { timeout: step.timeout });
+          value = { selector: step.selector, visible: true };
+          break;
+        case "waitForNavigation":
+          await page.waitForLoadState(toLoadState(step.waitUntil), { timeout: step.timeout });
+          value = { state: toLoadState(step.waitUntil) };
+          break;
+        case "hover":
+          await hoverElement(step.selector!);
+          value = { hovered: step.selector };
+          break;
+        case "scroll":
+          await scrollPage(step.x, step.y);
+          value = { x: step.x, y: step.y };
+          break;
+        case "scrollToTop":
+          await scrollToTop();
+          value = { position: "top" };
+          break;
+        case "scrollToBottom":
+          await scrollToBottom();
+          value = { position: "bottom" };
+          break;
+        case "extractText": {
+          const selector = step.selector || "body";
+          const text = await page.$eval(selector, (el: HTMLElement) => el.textContent ?? "");
+          value = text;
+          break;
+        }
+        case "extractHtml": {
+          const html = await page.$eval(step.selector!, (el: HTMLElement) => el.innerHTML);
+          value = html;
+          break;
+        }
+        case "extractAttribute": {
+          const attribute = await page.$eval(
+            step.selector!,
+            (el: HTMLElement, name: string) => el.getAttribute(name),
+            step.attribute!,
+          );
+          value = attribute;
+          break;
+        }
+        case "assertText": {
+          const selector = step.selector || "body";
+          const actual = await page.$eval(selector, (el: HTMLElement) => el.textContent ?? "");
+          if (!textMatches(actual, step.text!, step.match)) {
+            throw new Error(`assertText failed at ${selector}. expected ${step.match} "${step.text}" but got "${actual}"`);
+          }
+          value = { selector, matched: true, match: step.match };
+          break;
+        }
+        case "assertVisible":
+          await page.waitForSelector(step.selector!, { timeout: step.timeout });
+          value = { selector: step.selector, visible: true };
+          break;
+        case "assertUrl": {
+          const actual = page.url();
+          if (!textMatches(actual, step.text!, step.match)) {
+            throw new Error(`assertUrl failed. expected ${step.match} "${step.text}" but got "${actual}"`);
+          }
+          value = { url: actual, matched: true, match: step.match };
+          break;
+        }
+        case "evaluate":
+          value = await page.evaluate(step.script!);
+          break;
+        case "screenshot": {
+          const buffer = await page.screenshot({ fullPage: step.fullPage });
+          await writeFile(step.filepath!, buffer);
+          value = { filepath: step.filepath, size: buffer.length };
+          break;
+        }
+      }
+
+      if (step.variable) {
+        variables[step.variable] = value;
+      }
+
+      results.push({
+        index,
+        name: label,
+        action: step.action,
+        ok: true,
+        value,
+      });
+    } catch (err) {
+      const error = err instanceof Error ? err.message : String(err);
+      results.push({
+        index,
+        name: label,
+        action: step.action,
+        ok: false,
+        error,
+      });
+
+      if (step.continueOnError) {
+        continue;
+      }
+
+      if (stopOnError) {
+        return {
+          success: false,
+          failedStep: index,
+          error,
+          results,
+          variables,
+          currentUrl: page.url(),
+          title: await page.title(),
+        };
+      }
+    }
+  }
+
+  return {
+    success: results.every((result) => result.ok === true),
+    results,
+    variables,
+    currentUrl: page.url(),
+    title: await page.title(),
+  };
+}
+
 const tools = [
   createTool({
     name: "browser_set_headless",
@@ -44,10 +357,7 @@ const tools = [
     description: "Go to a URL. Use this first to load a webpage before taking actions. Supports any HTTP/HTTPS URL.",
     schema: {
       url: z.string().describe("Full URL including https:// (e.g., https://example.com)"),
-      waitUntil: z
-        .enum(["load", "domcontentloaded", "networkidle", "commit"])
-        .default("networkidle")
-        .describe("When to consider navigation complete: networkidle (recommended) waits for all requests to finish"),
+      waitUntil: waitUntilSchema.describe("When to consider navigation complete: networkidle (recommended) waits for all requests to finish"),
     },
     handler: async ({ url, waitUntil }) => {
       const page = await getPage();
@@ -268,6 +578,24 @@ const tools = [
       await reload();
       return success({});
     },
+  }),
+  createTool({
+    name: "browser_run_flow",
+    description: "Run multiple browser actions in sequence in a single call. Best for multi-step workflows like navigation, form filling, scraping, extraction, assertions, screenshots, and general browser automation.",
+    schema: {
+      steps: z.array(automationStepSchema).min(1).describe("Ordered list of browser actions to run in a single multi-step workflow"),
+      stopOnError: z.boolean().default(true).describe("Stop immediately when a step fails. Recommended for tests or strict workflows."),
+    },
+    handler: async ({ steps, stopOnError }) => runBrowserFlow(steps, stopOnError),
+  }),
+  createTool({
+    name: "browser_run_automation",
+    description: "Backward-compatible alias for browser_run_flow. Use browser_run_flow for new integrations and general multi-step browser workflows.",
+    schema: {
+      steps: z.array(automationStepSchema).min(1).describe("Ordered list of browser actions to run in a single multi-step workflow"),
+      stopOnError: z.boolean().default(true).describe("Stop immediately when a step fails. Recommended for tests or strict workflows."),
+    },
+    handler: async ({ steps, stopOnError }) => runBrowserFlow(steps, stopOnError),
   }),
 ];
 
