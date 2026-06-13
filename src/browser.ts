@@ -7,8 +7,16 @@ let browserInstance: Browser | null = null;
 let pageInstance: Page | null = null;
 let headlessOption = true;
 
-export function setHeadless(headless: boolean): void {
+export async function setHeadless(headless: boolean): Promise<boolean> {
+  const changed = headlessOption !== headless;
   headlessOption = headless;
+  // Browser reads headlessOption only at launch time. If an instance is already
+  // running with a different mode, close it so the new setting applies on next use.
+  const restarted = changed && browserInstance !== null;
+  if (restarted) {
+    await closeBrowser();
+  }
+  return restarted;
 }
 
 export function isHeadless(): boolean {
@@ -27,6 +35,12 @@ export async function getPage(): Promise<Page> {
     pageInstance = await browserInstance.newPage();
   }
   return pageInstance;
+}
+
+// Update the active page so that tab switching inside a flow keeps subsequent
+// single-action tools pointed at the same tab.
+export function setPage(page: Page): void {
+  pageInstance = page;
 }
 
 export async function closeBrowser(): Promise<void> {

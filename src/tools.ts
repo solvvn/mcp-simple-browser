@@ -2,7 +2,7 @@ import { z } from "zod";
 import { writeFile } from "fs/promises";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
-import { closeBrowser, getPage, setHeadless, isHeadless, pressKey, scrollPage, scrollToTop, scrollToBottom, hoverElement, goBack, goForward, reload } from "./browser.js";
+import { closeBrowser, getPage, setPage, setHeadless, isHeadless, pressKey, scrollPage, scrollToTop, scrollToBottom, hoverElement, goBack, goForward, reload } from "./browser.js";
 
 type ToolHandler<T extends z.ZodRawShape> = (args: z.infer<z.ZodObject<T>>) => Promise<unknown>;
 
@@ -47,6 +47,8 @@ const automationStepSchema = z
         "wait",
         "waitForSelector",
         "waitForNavigation",
+        "waitForURL",
+        "waitForResponse",
         "hover",
         "scroll",
         "scrollToTop",
@@ -56,33 +58,45 @@ const automationStepSchema = z
         "extractAttribute",
         "assertText",
         "assertVisible",
+        "assertNotVisible",
         "assertUrl",
+        "assertCount",
+        "assertAttribute",
+        "assertValue",
+        "assertChecked",
+        "switchTab",
+        "waitForTab",
+        "closeTab",
         "evaluate",
         "screenshot",
       ])
       .describe("Action to execute in the current browser session"),
     name: z.string().optional().describe("Optional label for easier debugging"),
-    selector: z.string().optional().describe("CSS selector used by the action"),
-    url: z.string().optional().describe("Target URL for navigate"),
-    text: z.string().optional().describe("Input text or expected text depending on action"),
+    selector: z.string().optional().describe("CSS selector used by the action. Supports ${var} interpolation from prior steps"),
+    frame: z.string().optional().describe("Optional CSS selector of an <iframe> to scope this action inside. Supports ${var}"),
+    url: z.string().optional().describe("Target URL for navigate, or URL pattern for waitForURL/waitForResponse. Supports ${var}"),
+    text: z.string().optional().describe("Input text or expected text depending on action. Supports ${var} interpolation"),
     key: z.string().optional().describe("Keyboard key for press"),
     milliseconds: z.number().optional().describe("Delay in milliseconds for wait"),
     delay: z.number().default(50).describe("Delay between keystrokes for type"),
     timeout: z.number().default(5000).describe("Timeout in milliseconds"),
     waitUntil: waitUntilSchema.describe("Navigation wait strategy"),
     fullPage: z.boolean().default(false).describe("Capture full page for screenshot"),
-    filepath: z.string().optional().describe("Absolute path for saved screenshot"),
+    filepath: z.string().optional().describe("Absolute path for saved screenshot. Supports ${var}"),
     x: z.number().default(0).describe("Horizontal scroll amount"),
     y: z.number().default(0).describe("Vertical scroll amount"),
-    script: z.string().optional().describe("JavaScript to run inside browser context"),
-    variable: z.string().optional().describe("Store the step result under this key"),
-    attribute: z.string().optional().describe("Attribute name for extractAttribute"),
+    script: z.string().optional().describe("JavaScript to run inside browser context. Supports ${var}"),
+    variable: z.string().optional().describe("Store the step result under this key for use as ${key} in later steps"),
+    attribute: z.string().optional().describe("Attribute name for extractAttribute or assertAttribute"),
+    count: z.number().optional().describe("Expected number of matching elements for assertCount"),
+    checked: z.boolean().optional().describe("Expected checked state for assertChecked"),
+    tabIndex: z.number().optional().describe("Zero-based tab index for switchTab"),
     match: z
       .enum(["equals", "includes", "regex"])
       .default("includes")
-      .describe("Comparison mode for assertText or assertUrl"),
-    selectedValue: z.string().optional().describe("Value to select for selectOption"),
-    continueOnError: z.boolean().default(false).describe("Continue even if this step fails"),
+      .describe("Comparison mode for assertText/assertUrl/assertAttribute/assertValue/waitForURL/waitForResponse"),
+    selectedValue: z.string().optional().describe("Value to select for selectOption. Supports ${var}"),
+    continueOnError: z.boolean().default(false).describe("Continue even if this step fails (soft assertion)"),
   })
   .superRefine((step, ctx) => {
     const requireField = (field: keyof typeof step, message: string) => {
@@ -99,6 +113,7 @@ const automationStepSchema = z
       case "hover":
       case "waitForSelector":
       case "assertVisible":
+      case "assertNotVisible":
       case "extractHtml":
       case "clear":
       case "focus":
@@ -122,6 +137,12 @@ const automationStepSchema = z
         break;
       case "waitForNavigation":
         break;
+      case "waitForURL":
+        requireField("url", "url is required for waitForURL");
+        break;
+      case "waitForResponse":
+        requireField("url", "url is required for waitForResponse");
+        break;
       case "scroll":
         requireField("y", "y is required for scroll");
         break;
@@ -134,6 +155,35 @@ const automationStepSchema = z
         break;
       case "assertUrl":
         requireField("text", "text is required for assertUrl");
+        break;
+      case "assertCount":
+        requireField("selector", "selector is required for assertCount");
+        if (step.count === undefined) {
+          ctx.addIssue({ code: z.ZodIssueCode.custom, message: "count is required for assertCount", path: ["count"] });
+        }
+        break;
+      case "assertAttribute":
+        requireField("selector", "selector is required for assertAttribute");
+        requireField("attribute", "attribute is required for assertAttribute");
+        requireField("text", "text is required for assertAttribute");
+        break;
+      case "assertValue":
+        requireField("selector", "selector is required for assertValue");
+        requireField("text", "text is required for assertValue");
+        break;
+      case "assertChecked":
+        requireField("selector", "selector is required for assertChecked");
+        if (step.checked === undefined) {
+          ctx.addIssue({ code: z.ZodIssueCode.custom, message: "checked is required for assertChecked", path: ["checked"] });
+        }
+        break;
+      case "switchTab":
+        if (step.tabIndex === undefined) {
+          ctx.addIssue({ code: z.ZodIssueCode.custom, message: "tabIndex is required for switchTab", path: ["tabIndex"] });
+        }
+        break;
+      case "waitForTab":
+      case "closeTab":
         break;
       case "evaluate":
         requireField("script", "script is required for evaluate");
@@ -156,6 +206,39 @@ function textMatches(actual: string, expected: string, match: "equals" | "includ
   return actual.includes(expected);
 }
 
+// Resolve a dot-path like "user.url" against the variables collected so far.
+function resolveVariable(path: string, variables: Record<string, unknown>): unknown {
+  return path.split(".").reduce<unknown>((acc, key) => {
+    if (acc === null || acc === undefined) return undefined;
+    return (acc as Record<string, unknown>)[key];
+  }, variables);
+}
+
+// Replace ${var} / ${var.path} tokens in a string with values from prior steps.
+function interpolate(input: string, variables: Record<string, unknown>): string {
+  return input.replace(/\$\{([^}]+)\}/g, (_, expr: string) => {
+    const value = resolveVariable(expr.trim(), variables);
+    if (value === undefined || value === null) return "";
+    return typeof value === "string" ? value : JSON.stringify(value);
+  });
+}
+
+const INTERPOLATED_FIELDS = ["selector", "frame", "url", "text", "key", "script", "attribute", "selectedValue", "filepath"] as const;
+
+function interpolateStep(
+  step: z.infer<typeof automationStepSchema>,
+  variables: Record<string, unknown>,
+): z.infer<typeof automationStepSchema> {
+  const out = { ...step } as Record<string, unknown>;
+  for (const field of INTERPOLATED_FIELDS) {
+    const current = out[field];
+    if (typeof current === "string") {
+      out[field] = interpolate(current, variables);
+    }
+  }
+  return out as z.infer<typeof automationStepSchema>;
+}
+
 function toLoadState(waitUntil: z.infer<typeof waitUntilSchema>): "load" | "domcontentloaded" | "networkidle" {
   return waitUntil === "commit" ? "domcontentloaded" : waitUntil;
 }
@@ -164,12 +247,17 @@ async function runBrowserFlow(
   steps: Array<z.infer<typeof automationStepSchema>>,
   stopOnError: boolean,
 ) {
-  const page = await getPage();
+  let page = await getPage();
   const variables: Record<string, unknown> = {};
   const results: Array<Record<string, unknown>> = [];
 
-  for (const [index, step] of steps.entries()) {
+  for (const [index, rawStep] of steps.entries()) {
+    const step = interpolateStep(rawStep, variables);
     const label = createStepLabel(step, index);
+
+    // Scope element actions to an iframe when `frame` is set, otherwise the page.
+    const scope = step.frame ? page.frameLocator(step.frame) : page;
+    const locator = step.selector ? scope.locator(step.selector) : null;
 
     try {
       let value: unknown = null;
@@ -180,36 +268,36 @@ async function runBrowserFlow(
           value = { url: page.url(), title: await page.title() };
           break;
         case "click":
-          await page.click(step.selector!);
+          await locator!.click({ timeout: step.timeout });
           value = { clicked: step.selector };
           break;
         case "type":
-          await page.type(step.selector!, step.text!, { delay: step.delay });
+          await locator!.pressSequentially(step.text!, { delay: step.delay, timeout: step.timeout });
           value = { typed: step.selector, length: step.text!.length };
           break;
         case "clear":
-          await page.locator(step.selector!).clear();
+          await locator!.clear({ timeout: step.timeout });
           value = { cleared: step.selector };
           break;
         case "focus":
-          await page.focus(step.selector!);
+          await locator!.focus({ timeout: step.timeout });
           value = { focused: step.selector };
           break;
         case "selectOption": {
-          const selected = await page.selectOption(step.selector!, step.selectedValue!);
+          const selected = await locator!.selectOption(step.selectedValue!, { timeout: step.timeout });
           value = { selector: step.selector, selected };
           break;
         }
         case "check":
-          await page.check(step.selector!);
+          await locator!.check({ timeout: step.timeout });
           value = { checked: step.selector };
           break;
         case "uncheck":
-          await page.uncheck(step.selector!);
+          await locator!.uncheck({ timeout: step.timeout });
           value = { unchecked: step.selector };
           break;
         case "press":
-          await pressKey(step.key!);
+          await page.press("body", step.key!);
           value = { key: step.key };
           break;
         case "wait":
@@ -217,61 +305,76 @@ async function runBrowserFlow(
           value = { waited: step.milliseconds };
           break;
         case "waitForSelector":
-          await page.waitForSelector(step.selector!, { timeout: step.timeout });
+          await locator!.waitFor({ state: "visible", timeout: step.timeout });
           value = { selector: step.selector, visible: true };
           break;
         case "waitForNavigation":
           await page.waitForLoadState(toLoadState(step.waitUntil), { timeout: step.timeout });
           value = { state: toLoadState(step.waitUntil) };
           break;
+        case "waitForURL": {
+          const pattern = step.url!;
+          const mode = step.match;
+          await page.waitForURL(
+            (url) => textMatches(url.toString(), pattern, mode),
+            { timeout: step.timeout, waitUntil: toLoadState(step.waitUntil) },
+          );
+          value = { url: page.url(), matched: true };
+          break;
+        }
+        case "waitForResponse": {
+          const pattern = step.url!;
+          const mode = step.match;
+          const response = await page.waitForResponse(
+            (res) => textMatches(res.url(), pattern, mode),
+            { timeout: step.timeout },
+          );
+          value = { url: response.url(), status: response.status(), ok: response.ok() };
+          break;
+        }
         case "hover":
-          await hoverElement(step.selector!);
+          await locator!.hover({ timeout: step.timeout });
           value = { hovered: step.selector };
           break;
         case "scroll":
-          await scrollPage(step.x, step.y);
+          await page.evaluate(({ x, y }) => window.scrollBy(x, y), { x: step.x, y: step.y });
           value = { x: step.x, y: step.y };
           break;
         case "scrollToTop":
-          await scrollToTop();
+          await page.evaluate(() => window.scrollTo(0, 0));
           value = { position: "top" };
           break;
         case "scrollToBottom":
-          await scrollToBottom();
+          await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
           value = { position: "bottom" };
           break;
         case "extractText": {
-          const selector = step.selector || "body";
-          const text = await page.$eval(selector, (el: HTMLElement) => el.textContent ?? "");
-          value = text;
+          const target = locator ?? scope.locator("body");
+          value = (await target.textContent({ timeout: step.timeout })) ?? "";
           break;
         }
-        case "extractHtml": {
-          const html = await page.$eval(step.selector!, (el: HTMLElement) => el.innerHTML);
-          value = html;
+        case "extractHtml":
+          value = await locator!.innerHTML({ timeout: step.timeout });
           break;
-        }
-        case "extractAttribute": {
-          const attribute = await page.$eval(
-            step.selector!,
-            (el: HTMLElement, name: string) => el.getAttribute(name),
-            step.attribute!,
-          );
-          value = attribute;
+        case "extractAttribute":
+          value = await locator!.getAttribute(step.attribute!, { timeout: step.timeout });
           break;
-        }
         case "assertText": {
-          const selector = step.selector || "body";
-          const actual = await page.$eval(selector, (el: HTMLElement) => el.textContent ?? "");
+          const target = locator ?? scope.locator("body");
+          const actual = (await target.textContent({ timeout: step.timeout })) ?? "";
           if (!textMatches(actual, step.text!, step.match)) {
-            throw new Error(`assertText failed at ${selector}. expected ${step.match} "${step.text}" but got "${actual}"`);
+            throw new Error(`assertText failed at ${step.selector ?? "body"}. expected ${step.match} "${step.text}" but got "${actual}"`);
           }
-          value = { selector, matched: true, match: step.match };
+          value = { selector: step.selector ?? "body", matched: true, match: step.match };
           break;
         }
         case "assertVisible":
-          await page.waitForSelector(step.selector!, { timeout: step.timeout });
+          await locator!.waitFor({ state: "visible", timeout: step.timeout });
           value = { selector: step.selector, visible: true };
+          break;
+        case "assertNotVisible":
+          await locator!.waitFor({ state: "hidden", timeout: step.timeout });
+          value = { selector: step.selector, visible: false };
           break;
         case "assertUrl": {
           const actual = page.url();
@@ -279,6 +382,72 @@ async function runBrowserFlow(
             throw new Error(`assertUrl failed. expected ${step.match} "${step.text}" but got "${actual}"`);
           }
           value = { url: actual, matched: true, match: step.match };
+          break;
+        }
+        case "assertCount": {
+          const actual = await locator!.count();
+          if (actual !== step.count) {
+            throw new Error(`assertCount failed at ${step.selector}. expected ${step.count} but got ${actual}`);
+          }
+          value = { selector: step.selector, count: actual };
+          break;
+        }
+        case "assertAttribute": {
+          const actual = await locator!.getAttribute(step.attribute!, { timeout: step.timeout });
+          if (actual === null || !textMatches(actual, step.text!, step.match)) {
+            throw new Error(`assertAttribute failed at ${step.selector}[${step.attribute}]. expected ${step.match} "${step.text}" but got ${actual === null ? "null" : `"${actual}"`}`);
+          }
+          value = { selector: step.selector, attribute: step.attribute, matched: true };
+          break;
+        }
+        case "assertValue": {
+          const actual = await locator!.inputValue({ timeout: step.timeout });
+          if (!textMatches(actual, step.text!, step.match)) {
+            throw new Error(`assertValue failed at ${step.selector}. expected ${step.match} "${step.text}" but got "${actual}"`);
+          }
+          value = { selector: step.selector, matched: true };
+          break;
+        }
+        case "assertChecked": {
+          const actual = await locator!.isChecked({ timeout: step.timeout });
+          if (actual !== step.checked) {
+            throw new Error(`assertChecked failed at ${step.selector}. expected ${step.checked} but got ${actual}`);
+          }
+          value = { selector: step.selector, checked: actual };
+          break;
+        }
+        case "switchTab": {
+          const pages = page.context().pages();
+          const target = pages[step.tabIndex!];
+          if (!target) {
+            throw new Error(`switchTab failed. no tab at index ${step.tabIndex}, only ${pages.length} open`);
+          }
+          page = target;
+          await page.bringToFront();
+          setPage(page);
+          value = { tabIndex: step.tabIndex, url: page.url() };
+          break;
+        }
+        case "waitForTab": {
+          const target = await page.context().waitForEvent("page", { timeout: step.timeout });
+          await target.waitForLoadState(toLoadState(step.waitUntil), { timeout: step.timeout }).catch(() => {});
+          page = target;
+          await page.bringToFront();
+          setPage(page);
+          value = { url: page.url(), title: await page.title() };
+          break;
+        }
+        case "closeTab": {
+          const context = page.context();
+          await page.close();
+          const next = context.pages()[0];
+          if (!next) {
+            throw new Error("closeTab failed. no remaining tab");
+          }
+          page = next;
+          await page.bringToFront();
+          setPage(page);
+          value = { closed: true, url: page.url() };
           break;
         }
         case "evaluate":
@@ -348,13 +517,13 @@ const tools = [
       headless: z.boolean().describe("true = headless (no visible window), false = show browser window"),
     },
     handler: async ({ headless }) => {
-      setHeadless(headless);
-      return success({ headless, current: isHeadless() });
+      const restarted = await setHeadless(headless);
+      return success({ headless, current: isHeadless(), restarted });
     },
   }),
   createTool({
     name: "browser_navigate",
-    description: "Go to a URL. Use this first to load a webpage before taking actions. Supports any HTTP/HTTPS URL.",
+    description: "Go to a URL (single one-off action). Supports any HTTP/HTTPS URL. If the task has further steps after loading, prefer browser_run_flow instead of chaining single actions.",
     schema: {
       url: z.string().describe("Full URL including https:// (e.g., https://example.com)"),
       waitUntil: waitUntilSchema.describe("When to consider navigation complete: networkidle (recommended) waits for all requests to finish"),
@@ -367,7 +536,7 @@ const tools = [
   }),
   createTool({
     name: "browser_click",
-    description: "Click a button, link, or any element. Use after navigating to a page. Requires knowing the element's CSS selector.",
+    description: "Click a button, link, or any element (single one-off action). Requires the element's CSS selector. For a multi-step interaction, prefer browser_run_flow.",
     schema: {
       selector: z.string().describe("CSS selector of the element to click (e.g., button, a, #id, .class)"),
     },
@@ -378,7 +547,7 @@ const tools = [
   }),
   createTool({
     name: "browser_type",
-    description: "Type text into an input field or text area. Use for filling forms, search boxes, or any text input.",
+    description: "Type text into an input field or text area (single one-off action). For filling a form with multiple fields, prefer browser_run_flow.",
     schema: {
       selector: z.string().describe("CSS selector of the input field (e.g., input, textarea, #search)"),
       text: z.string().describe("Text to type"),
@@ -581,7 +750,7 @@ const tools = [
   }),
   createTool({
     name: "browser_run_flow",
-    description: "Run multiple browser actions in sequence in a single call. Best for multi-step workflows like navigation, form filling, scraping, extraction, assertions, screenshots, and general browser automation.",
+    description: "PREFERRED tool for ANY browser task with 2+ steps — use this instead of chaining single-action tools. Runs an ordered list of actions in ONE call on the same page: navigation, form filling, scraping, extraction, assertions, screenshots, and automation tests. Supports ${var} interpolation between steps (store with `variable`, reuse in any string field), iframe scoping via `frame`, multi-tab control (switchTab/waitForTab/closeTab), network waits (waitForURL/waitForResponse), and assertions (assertText/assertVisible/assertNotVisible/assertUrl/assertCount/assertAttribute/assertValue/assertChecked). For tests, set stopOnError: true.",
     schema: {
       steps: z.array(automationStepSchema).min(1).describe("Ordered list of browser actions to run in a single multi-step workflow"),
       stopOnError: z.boolean().default(true).describe("Stop immediately when a step fails. Recommended for tests or strict workflows."),

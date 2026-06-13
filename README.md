@@ -176,14 +176,74 @@ Supported `action` values:
 - `scroll`
 - `scrollToTop`
 - `scrollToBottom`
+- `waitForURL`
+- `waitForResponse`
 - `extractText`
 - `extractHtml`
 - `extractAttribute`
 - `assertText`
 - `assertVisible`
+- `assertNotVisible`
 - `assertUrl`
+- `assertCount`
+- `assertAttribute`
+- `assertValue`
+- `assertChecked`
+- `switchTab`
+- `waitForTab`
+- `closeTab`
 - `evaluate`
 - `screenshot`
+
+### Variable interpolation between steps
+
+Store any step result with `variable`, then reference it as `${name}` (or `${name.path}` for nested values) in any string field of later steps: `selector`, `frame`, `url`, `text`, `key`, `script`, `attribute`, `selectedValue`, `filepath`.
+
+```javascript
+await browser_run_flow({
+  steps: [
+    { action: "navigate", url: "https://example.com" },
+    { action: "extractAttribute", selector: ".item a", attribute: "href", variable: "link" },
+    { action: "navigate", url: "${link}" },
+    { action: "assertUrl", text: "${link}", match: "includes" }
+  ]
+})
+```
+
+### iframe, tabs and network waits
+
+```javascript
+await browser_run_flow({
+  steps: [
+    { action: "navigate", url: "https://example.com" },
+    // Scope an action inside an <iframe> with `frame`
+    { action: "click", frame: "iframe#payment", selector: "button.pay" },
+    // Wait for a new tab/popup and switch to it
+    { action: "waitForTab", timeout: 10000 },
+    // Wait for a specific network response
+    { action: "waitForResponse", url: "/api/checkout", match: "includes" },
+    // Switch between open tabs by index, or close the current one
+    { action: "switchTab", tabIndex: 0 },
+    { action: "closeTab" }
+  ]
+})
+```
+
+### Extended assertions
+
+```javascript
+await browser_run_flow({
+  steps: [
+    { action: "navigate", url: "https://example.com/cart" },
+    { action: "assertCount", selector: ".cart-item", count: 3 },
+    { action: "assertValue", selector: "#coupon", text: "SAVE10", match: "equals" },
+    { action: "assertChecked", selector: "#agree", checked: true },
+    { action: "assertAttribute", selector: ".badge", attribute: "data-status", text: "active" },
+    { action: "assertNotVisible", selector: ".loading-spinner" },
+    { action: "waitForURL", url: "/checkout", match: "includes" }
+  ]
+})
+```
 
 ### Example: Scraping in One Call
 
