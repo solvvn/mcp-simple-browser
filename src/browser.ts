@@ -7,6 +7,9 @@ let browserInstance: Browser | null = null;
 let pageInstance: Page | null = null;
 let headlessOption = true;
 
+// Viewport used in headless mode, where there is no real OS window to size against.
+const HEADLESS_VIEWPORT = { width: 1920, height: 1080 };
+
 export async function setHeadless(headless: boolean): Promise<boolean> {
   const changed = headlessOption !== headless;
   headlessOption = headless;
@@ -24,7 +27,9 @@ export function isHeadless(): boolean {
 }
 
 function createBrowser(): Promise<Browser> {
-  return launch({ headless: headlessOption, humanize: true });
+  // In headed mode, open the window maximized so the page can use the full screen.
+  const args = headlessOption ? [] : ["--start-maximized"];
+  return launch({ headless: headlessOption, humanize: true, args });
 }
 
 export async function getPage(): Promise<Page> {
@@ -32,7 +37,12 @@ export async function getPage(): Promise<Page> {
     browserInstance = await createBrowser();
   }
   if (!pageInstance) {
-    pageInstance = await browserInstance.newPage();
+    // headless: pin a large viewport since there is no OS window.
+    // headed: viewport null lets the page fill the actual (maximized) window —
+    // otherwise Playwright locks it to 1280x720 and content gets clipped.
+    pageInstance = await browserInstance.newPage({
+      viewport: headlessOption ? HEADLESS_VIEWPORT : null,
+    });
   }
   return pageInstance;
 }
