@@ -90,23 +90,110 @@ Add to your Claude Desktop config:
 | `browser_save_screenshot` | Take a screenshot and save to file |
 | `browser_click` | Click an element by CSS selector |
 | `browser_type` | Type text into an input field |
-| `browser_get_content` | Get HTML content of the page |
+| `browser_get_content` | Get page HTML, scripts/styles/comments stripped |
 | `browser_get_text` | Get text content from page or element |
+| `browser_inspect` | Read the UI as text: snapshot, styles, or audit |
 | `browser_evaluate` | Execute JavaScript in page context |
 | `browser_search` | Search the web (Google, DuckDuckGo, Bing) |
-| `browser_wait` | Wait for specified milliseconds |
 | `browser_print_to_pdf` | Print page to PDF |
-| `browser_press` | Press a keyboard key |
-| `browser_scroll` | Scroll page by pixel offset |
-| `browser_scroll_to_top` | Scroll to the top of the page |
-| `browser_scroll_to_bottom` | Scroll to the bottom of the page |
-| `browser_hover` | Hover over an element |
 | `browser_go_back` | Navigate back in browser history |
 | `browser_go_forward` | Navigate forward in browser history |
 | `browser_reload` | Reload the current page |
 | `browser_run_flow` | Run a complete multi-step browser workflow in one call |
-| `browser_run_automation` | Backward-compatible alias of `browser_run_flow` |
 | `browser_close` | Close browser and cleanup |
+
+## Seeing the Page Without a Screenshot
+
+`browser_inspect` describes the interface as text. It is far cheaper than an
+image and states exact numbers a screenshot can only imply.
+
+### `mode: "snapshot"` — what is on the page and what can be acted on
+
+```
+h1 Sign in to GitHub
+--
+e1 input:text "Username or email address"
+e2 input:password "Password"
+e4 input:submit "Sign in"
+e7 a "Create an account"
+```
+
+Each listed element is stamped with `data-ref` in the DOM, so the next step acts
+on it through an ordinary CSS selector — no new selector syntax:
+
+```javascript
+await browser_run_flow({
+  steps: [
+    { action: "navigate", url: "https://github.com/login" },
+    { action: "snapshot", variable: "ui" },
+    { action: "type", selector: "[data-ref='e1']", text: "octocat" },
+    { action: "click", selector: "[data-ref='e4']" }
+  ]
+})
+```
+
+Refs are re-assigned on every snapshot and wiped by navigation or a framework
+re-render, so snapshot again after the page changes.
+
+### `mode: "audit"` — what is visually broken
+
+```
+contrast div.hero: 1.43:1 below 4.5 (rgb(207, 207, 207))
+covered button.btn: obscured by div.overlay
+tap-target button.tiny: 14x14px under 24x24
+clipped div.clip: content 346px in a 120px box
+broken-img /missing.png
+overflow-x: page is 1700px wide vs viewport 1440px
+```
+
+It reports WCAG contrast ratios, horizontal overflow, text clipped by its box,
+controls covered by another element, targets under 24x24, and broken images. A
+control hidden behind a nearly transparent overlay is invisible in a screenshot
+but caught here.
+
+### `mode: "styles"` — how an element is actually rendered
+
+```
+button.btn [200x44 @20,86] display:block; position:absolute; padding:1px 6px;
+  color:rgb(255, 255, 255); backgroundColor:rgb(0, 102, 204); fontSize:13.33px
+```
+
+### Cost, measured
+
+| Page | Raw HTML | Screenshot 1440x900 | `browser_inspect` |
+|---|---|---|---|
+| github.com/login | ~15,400 tok | ~1,730 tok | 120 tok (snapshot) / 57 tok (audit) |
+| wikipedia.org | ~29,800 tok | ~1,730 tok | ~300 tok (snapshot) |
+
+### When you still need a screenshot
+
+Aesthetic judgement, imagery and icon content, animation and transitional
+states, and anything drawn in canvas, WebGL or video. `browser_inspect` measures
+the interface; it does not look at it.
+
+## Token Efficiency
+
+The server is tuned to keep responses small, since browser output is usually the
+largest thing an agent reads:
+
+- `browser_get_content` strips `<script>`, `<style>`, comments and inline SVG,
+  and collapses whitespace. Pass `selector` to scope it, `maxLength` to cap it
+  (default 20000 chars), or `raw: true` for the untouched HTML.
+- `browser_get_text` collapses whitespace and takes the same `maxLength`. Prefer
+  it over `browser_get_content` when only the wording matters.
+- `browser_evaluate` caps its return value with `maxLength` too.
+- `browser_run_flow` reports passing steps as a `steps: "9/9"` count instead of
+  echoing every step back. A step is listed individually only when it fails, is
+  given a `name`, or returns data. Use `variable` (or an `extract*` step) for
+  anything you need in the response; per-step output is capped by `maxLength`
+  (default 2000 chars).
+- `browser_inspect` replaces most screenshots, at a fraction of the tokens.
+- Errors are shortened: Playwright's multi-line `Call log:` tail is dropped and
+  the message is capped at 300 chars.
+- Actions that only ever appear mid-sequence — `wait`, `press`, `hover`,
+  `scroll`, `scrollToTop`, `scrollToBottom` — exist as `browser_run_flow` steps
+  only. Inside a flow they cost nothing extra, whereas a dedicated tool would
+  charge its schema every session whether used or not.
 
 ## Examples
 
@@ -117,7 +204,7 @@ Add to your Claude Desktop config:
 await browser_navigate({ url: "https://example.com" })
 
 // Take screenshot
-await browser_screenshot({ fullPage: true })
+await browser_save_screenshot({ filepath: "/tmp/shot.png", fullPage: true })
 ```
 
 ### Search
@@ -176,6 +263,9 @@ Supported `action` values:
 - `scroll`
 - `scrollToTop`
 - `scrollToBottom`
+- `goBack`
+- `goForward`
+- `reload`
 - `waitForURL`
 - `waitForResponse`
 - `extractText`
@@ -195,9 +285,28 @@ Supported `action` values:
 - `evaluate`
 - `screenshot`
 
+### Flow result shape
+
+```json
+{
+  "success": true,
+  "steps": "9/9",
+  "results": [{ "i": 7, "action": "extractText", "ok": true, "value": "..." }],
+  "variables": { "link": "https://example.com/x" },
+  "url": "https://example.com/x",
+  "title": "Example"
+}
+```
+
+`results` and `variables` are omitted when empty; `failedStep` is added when a
+step fails.
+
 ### Variable interpolation between steps
 
 Store any step result with `variable`, then reference it as `${name}` (or `${name.path}` for nested values) in any string field of later steps: `selector`, `frame`, `url`, `text`, `key`, `script`, `attribute`, `selectedValue`, `filepath`.
+
+Add `maxLength` to any `extract*` or `evaluate` step to cap how much of its
+result is returned (default 2000 chars).
 
 ```javascript
 await browser_run_flow({
@@ -289,3 +398,42 @@ yarn build
 ## License
 
 MIT
+
+## Migration to 2.0
+
+Six single-action tools and the `browser_run_automation` alias were removed
+because every one of them duplicated a `browser_run_flow` action while costing
+schema tokens in every session. Replace them with a flow step:
+
+| Removed tool | Replacement |
+|---|---|
+| `browser_wait` | `{ action: "wait", milliseconds: 500 }` |
+| `browser_press` | `{ action: "press", key: "Enter" }` |
+| `browser_hover` | `{ action: "hover", selector: "..." }` |
+| `browser_scroll` | `{ action: "scroll", y: 400 }` |
+| `browser_scroll_to_top` | `{ action: "scrollToTop" }` |
+| `browser_scroll_to_bottom` | `{ action: "scrollToBottom" }` |
+| `browser_run_automation` | `browser_run_flow` (identical arguments) |
+
+`goBack`, `goForward` and `reload` were added as flow actions so a flow no
+longer has to break out to a single-action tool.
+
+### Fixed in 2.0
+
+`browser_click`, `browser_type`, `browser_hover`, `browser_press` and the flow's
+`press` action used Playwright's legacy `page.<action>(selector)` APIs, which
+fail a `pointer_events check` on ordinary pages under CloakBrowser's `humanize`
+mode — they were unusable in 1.2.x. They now use the locator and keyboard APIs.
+
+`browser_search` returned an empty list on every engine: its selectors
+(`div.g`, `div[data-srg]`, `.result`) no longer match any current SERP, and the
+filter that dropped engine-domain URLs also dropped every Bing and Google
+result, since both wrap targets in their own redirector. Each engine now has its
+own result, title and snippet selectors, and Bing's base64 redirect is decoded
+back to the real URL. DuckDuckGo and Bing return direct URLs; Google hands back
+its `/goto?url=...` redirect, which resolves correctly when navigated but is not
+readable — prefer DuckDuckGo (the default) when the URL itself matters.
+
+`assertValue`, `assertText`, `assertUrl` and `assertAttribute` rejected an empty
+expected value, so a flow could not assert that a field is blank. An empty
+string is now accepted for assertions only; `type` still requires real text.

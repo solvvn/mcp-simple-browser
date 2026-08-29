@@ -6,14 +6,13 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { registerTools } from "./tools.js";
 
-const INSTRUCTIONS = `This server controls a single stateful browser session.
+const INSTRUCTIONS = `One stateful browser session, kept alive until browser_close.
 
-TOOL SELECTION — read before choosing a tool:
-- PREFER browser_run_flow for ANY task with 2 or more browser steps. It runs an ordered list of actions in ONE call, sharing the same page, with variable passing (\${var}), assertions, iframe scoping, multi-tab control and network waits. This is the primary tool for navigation, form filling, scraping, and automation tests.
-- Do NOT chain the single-action tools (browser_navigate, browser_click, browser_type, ...) for a multi-step task. One tool call per step is slower, loses result-passing between steps, and is the wrong default. Use single-action tools ONLY for a genuine one-off action or quick interactive inspection.
-- For automation tests, build the whole scenario as one browser_run_flow with assert* steps and stopOnError: true.
+Use browser_run_flow for any task of 2+ steps: it runs the whole sequence in one call on the same page, with \${var} passing, iframe scoping, tabs, network waits and assertions. Chaining the single-action tools instead is slower and costs far more tokens — reserve them for a genuine one-off.
 
-The browser persists across calls until browser_close. Set visibility with browser_set_headless (false shows the window).`;
+Scope and cap what you read back: pass a selector to browser_get_text (cheaper than browser_get_content), and lower maxLength when you only need a fragment.
+
+To see a page, use browser_inspect, not a screenshot: mode snapshot lists the interactive elements and stamps each with a data-ref you can click as [data-ref="e5"], mode audit reports contrast, overflow, clipped text, covered controls and broken images, mode styles gives computed style and geometry. All three cost a fraction of an image and state exact numbers. Screenshot only when the question is genuinely visual - aesthetics, imagery, animation.`;
 
 async function main() {
   const server = new McpServer(

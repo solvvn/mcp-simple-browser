@@ -2,7 +2,7 @@ import { z } from "zod";
 import { writeFile } from "fs/promises";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
-import { closeBrowser, getPage, setPage, setHeadless, isHeadless, pressKey, scrollPage, scrollToTop, scrollToBottom, hoverElement, goBack, goForward, reload } from "./browser.js";
+import { closeBrowser, getPage, setPage, setHeadless, isHeadless } from "./browser.js";
 
 type ToolHandler<T extends z.ZodRawShape> = (args: z.infer<z.ZodObject<T>>) => Promise<unknown>;
 
@@ -21,11 +21,260 @@ function success<T extends Record<string, unknown>>(extra: T) {
   return { success: true, ...extra };
 }
 
+function collapse(text: string): string {
+  return text.replace(/[ \t\f\v]+/g, " ").replace(/\s*\n\s*/g, "\n").trim();
+}
+
+function clamp(text: string, max: number): string {
+  return text.length <= max ? text : `${text.slice(0, max)}\n…[truncated, ${text.length - max} more chars]`;
+}
+
+// Drop parts of the markup that carry no information for the model: scripts,
+// styles, inline SVG paths, comments, and the whitespace between tags.
+function compactHtml(html: string): string {
+  return html
+    .replace(/<(script|style|noscript|template)\b[^>]*>[\s\S]*?<\/\1>/gi, "")
+    .replace(/<svg\b[^>]*>[\s\S]*?<\/svg>/gi, "<svg/>")
+    .replace(/<!--[\s\S]*?-->/g, "")
+    .replace(/\s*\n\s*/g, "\n")
+    .replace(/>\s+</g, "><")
+    .trim();
+}
+
+// Playwright appends a multi-line "Call log:" to most errors; the first line
+// is what identifies the failure, the rest is retry noise.
+function shortError(err: unknown): string {
+  if (err instanceof z.ZodError) {
+    return clamp(err.issues.map((issue) => `${issue.path.join(".")}: ${issue.message}`).join("; "), 300);
+  }
+  const message = err instanceof Error ? err.message : String(err);
+  return clamp(collapse(message.split(/\n?Call log:/)[0]), 300);
+}
+
+// Only these actions return something the model cannot already infer from the
+// step it sent; everything else is confirmed by `ok` alone.
+const VERBOSE_ACTIONS = new Set(["extractText", "extractHtml", "extractAttribute", "evaluate", "waitForResponse", "waitForTab", "switchTab", "snapshot", "styles", "audit"]);
+
+function clampValue(value: unknown, max: number): unknown {
+  if (typeof value === "string") return clamp(value, max);
+  if (value === null || typeof value !== "object") return value;
+  const json = JSON.stringify(value);
+  return json.length <= max ? value : clamp(json, max);
+}
+
 const SearchEngines = {
-  google: (q: string) => `https://www.google.com/search?q=${q}`,
-  duckduckgo: (q: string) => `https://duckduckgo.com/?q=${q}`,
-  bing: (q: string) => `https://www.bing.com/search?q=${q}`,
+  google: {
+    url: (q: string) => `https://www.google.com/search?q=${q}`,
+    item: "div.MjjYud",
+    link: "a:has(h3)",
+    title: "h3",
+    snippet: "[data-sncf]",
+  },
+  duckduckgo: {
+    url: (q: string) => `https://duckduckgo.com/?q=${q}`,
+    item: "article[data-testid='result']",
+    link: "a[data-testid='result-title-a']",
+    title: "",
+    snippet: "[data-result='snippet']",
+  },
+  bing: {
+    url: (q: string) => `https://www.bing.com/search?q=${q}`,
+    item: "li.b_algo",
+    link: "h2 a",
+    title: "h2",
+    snippet: ".b_caption p, .b_algoSlug",
+  },
 } as const;
+
+// ---------------------------------------------------------------------------
+// Page inspection: text descriptions of the UI that stand in for a screenshot
+// everywhere except aesthetic judgement.
+// ---------------------------------------------------------------------------
+
+const INTERACTIVE_SELECTOR =
+  "a[href],button,input,select,textarea,summary,[role=button],[role=link],[role=tab],[role=checkbox],[role=radio],[role=menuitem],[role=switch],[contenteditable=true]";
+
+const STYLE_KEYS = [
+  "display", "position", "width", "height", "margin", "padding", "color", "backgroundColor",
+  "fontSize", "fontWeight", "fontFamily", "lineHeight", "borderRadius", "border", "boxShadow",
+  "flexDirection", "justifyContent", "alignItems", "gap", "gridTemplateColumns", "opacity", "zIndex",
+];
+
+interface InspectArgs {
+  mode: "snapshot" | "styles" | "audit";
+  selector: string;
+  interactive: string;
+  keys: string[];
+  max: number;
+}
+
+function inspectPage({ mode, selector, interactive, keys, max }: InspectArgs): string {
+  const clean = (value: unknown) => String(value ?? "").replace(/\s+/g, " ").trim();
+  const box = (el: Element) => el.getBoundingClientRect();
+
+  const hidden = (el: Element) => {
+    const r = box(el);
+    const s = getComputedStyle(el);
+    if (s.visibility === "hidden" || s.display === "none" || Number(s.opacity) <= 0.05) return true;
+    // Screen-reader-only patterns: clipped to nothing, or parked off-canvas.
+    if (r.width <= 1 && r.height <= 1) return true;
+    return r.bottom < -500 || r.right < -500;
+  };
+
+  const named = (el: Element) => {
+    const cls = typeof el.className === "string" && el.className.trim()
+      ? `.${el.className.trim().split(/\s+/)[0]}`
+      : "";
+    return el.tagName.toLowerCase() + (el.id ? `#${el.id}` : cls);
+  };
+
+  const label = (el: Element) => {
+    const input = el as HTMLInputElement;
+    const candidates = [
+      el.getAttribute("aria-label"),
+      input.labels?.[0]?.textContent,
+      el.getAttribute("placeholder"),
+      /^(submit|button|reset)$/.test(input.type ?? "") ? input.value : "",
+      (el as HTMLElement).innerText,
+      el.getAttribute("title"),
+      el.getAttribute("alt"),
+      el.getAttribute("name"),
+      el.id ? `#${el.id}` : "",
+    ];
+    for (const candidate of candidates) {
+      const value = clean(candidate);
+      if (value) return value.slice(0, 80);
+    }
+    return "";
+  };
+
+  const scope = selector ? document.querySelector(selector) : document.body;
+  if (!scope) throw new Error(`${mode}: no element matches ${selector}`);
+
+  if (mode === "styles") {
+    const out: string[] = [];
+    for (const el of [...document.querySelectorAll(selector || "body")].slice(0, max)) {
+      const style = getComputedStyle(el) as unknown as Record<string, string>;
+      const r = box(el);
+      const pairs = keys
+        .map((key) => [key, style[key]] as const)
+        .filter(([, value]) => value && !["none", "normal", "auto", "0px", "static", "rgba(0, 0, 0, 0)"].includes(value));
+      out.push(
+        `${named(el)} [${Math.round(r.width)}x${Math.round(r.height)} @${Math.round(r.x)},${Math.round(r.y)}] `
+        + pairs.map(([key, value]) => `${key}:${value}`).join("; "),
+      );
+    }
+    return out.join("\n") || `(no element matches ${selector})`;
+  }
+
+  if (mode === "snapshot") {
+    const lines: string[] = [];
+    scope.querySelectorAll("[data-ref]").forEach((el) => el.removeAttribute("data-ref"));
+
+    for (const heading of scope.querySelectorAll("h1,h2,h3")) {
+      if (hidden(heading)) continue;
+      const text = clean((heading as HTMLElement).innerText);
+      if (text) lines.push(`${heading.tagName.toLowerCase()} ${text.slice(0, 100)}`);
+    }
+    if (lines.length) lines.push("--");
+
+    let count = 0;
+    for (const el of scope.querySelectorAll(interactive)) {
+      if (count >= max) break;
+      if (hidden(el)) continue;
+      const ref = `e${++count}`;
+      el.setAttribute("data-ref", ref);
+      const input = el as HTMLInputElement;
+      const tag = el.tagName.toLowerCase();
+      const kind = tag === "input" ? `input:${input.type || "text"}` : tag;
+      const state: string[] = [];
+      if (input.disabled) state.push("disabled");
+      if (input.checked) state.push("checked");
+      if (input.value && !/^(submit|button|reset|checkbox|radio)$/.test(input.type ?? "")) {
+        state.push(`="${clean(input.value).slice(0, 40)}"`);
+      }
+      lines.push(`${ref} ${kind} "${label(el)}"${state.length ? ` ${state.join(" ")}` : ""}`);
+    }
+    return lines.join("\n") || "(no visible interactive elements)";
+  }
+
+  const channels = (value: string) => (value.match(/[\d.]+/g) ?? []).map(Number);
+  const luminance = (c: number[]) => {
+    const f = (x: number) => (x /= 255) <= 0.03928 ? x / 12.92 : ((x + 0.055) / 1.055) ** 2.4;
+    return 0.2126 * f(c[0]) + 0.7152 * f(c[1]) + 0.0722 * f(c[2]);
+  };
+  const backdrop = (el: Element) => {
+    for (let node: Element | null = el; node && node !== document.documentElement; node = node.parentElement) {
+      const c = channels(getComputedStyle(node).backgroundColor);
+      if (c.length >= 3 && (c[3] === undefined || c[3] > 0.5)) return c;
+    }
+    return [255, 255, 255];
+  };
+  const contrast = (el: Element) => {
+    const [light, dark] = [luminance(channels(getComputedStyle(el).color)), luminance(backdrop(el))].sort((a, b) => b - a);
+    return (light + 0.05) / (dark + 0.05);
+  };
+
+  const issues: string[] = [];
+  const report = (message: string) => { if (issues.length < max) issues.push(message); };
+
+  if (document.documentElement.scrollWidth > window.innerWidth + 1) {
+    report(`overflow-x: page is ${document.documentElement.scrollWidth}px wide vs viewport ${window.innerWidth}px`);
+  }
+
+  for (const el of scope.querySelectorAll("*")) {
+    if (issues.length >= max) break;
+    if (hidden(el)) continue;
+    const style = getComputedStyle(el);
+    const r = box(el);
+
+    if ([...el.childNodes].some((node) => node.nodeType === 3 && node.textContent?.trim())) {
+      const ratio = contrast(el);
+      const size = parseFloat(style.fontSize) || 16;
+      const floor = size >= 24 || (size >= 18.66 && Number(style.fontWeight) >= 700) ? 3 : 4.5;
+      if (ratio < floor) report(`contrast ${named(el)}: ${ratio.toFixed(2)}:1 below ${floor} (${style.color})`);
+      if (el.scrollWidth > el.clientWidth + 1 && !/auto|scroll/.test(style.overflowX + style.overflow)) {
+        report(`clipped ${named(el)}: content ${el.scrollWidth}px in a ${el.clientWidth}px box`);
+      }
+    }
+    if (r.right > window.innerWidth + 1) {
+      report(`offscreen ${named(el)}: ${Math.round(r.right - window.innerWidth)}px past the right edge`);
+    }
+
+    const role = el.getAttribute("role") ?? "";
+    if (/^(a|button|input|select|textarea)$/.test(el.tagName.toLowerCase()) || /^(button|link|tab|checkbox)$/.test(role)) {
+      // Inline links inside running text are not tap targets; only standalone
+      // controls are measured against the 24px floor.
+      if (style.display !== "inline" && Math.min(r.width, r.height) < 24) {
+        report(`tap-target ${named(el)}: ${Math.round(r.width)}x${Math.round(r.height)}px under 24x24`);
+      }
+      const hit = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
+      if (hit && hit !== el && !el.contains(hit) && !hit.contains(el)) {
+        report(`covered ${named(el)}: obscured by ${named(hit)}`);
+      }
+    }
+    const img = el as HTMLImageElement;
+    if (el.tagName === "IMG" && img.complete && img.naturalWidth === 0) {
+      report(`broken-img ${el.getAttribute("src")}`);
+    }
+  }
+  return issues.length ? issues.join("\n") : "(no layout or contrast issues found)";
+}
+
+async function runInspect(
+  page: Awaited<ReturnType<typeof getPage>>,
+  mode: InspectArgs["mode"],
+  selector: string,
+  max: number,
+): Promise<string> {
+  return page.evaluate(inspectPage, {
+    mode,
+    selector,
+    interactive: INTERACTIVE_SELECTOR,
+    keys: STYLE_KEYS,
+    max,
+  });
+}
 
 const waitUntilSchema = z
   .enum(["load", "domcontentloaded", "networkidle", "commit"])
@@ -53,6 +302,9 @@ const automationStepSchema = z
         "scroll",
         "scrollToTop",
         "scrollToBottom",
+        "goBack",
+        "goForward",
+        "reload",
         "extractText",
         "extractHtml",
         "extractAttribute",
@@ -69,38 +321,45 @@ const automationStepSchema = z
         "closeTab",
         "evaluate",
         "screenshot",
+        "snapshot",
+        "styles",
+        "audit",
       ])
-      .describe("Action to execute in the current browser session"),
-    name: z.string().optional().describe("Optional label for easier debugging"),
-    selector: z.string().optional().describe("CSS selector used by the action. Supports ${var} interpolation from prior steps"),
-    frame: z.string().optional().describe("Optional CSS selector of an <iframe> to scope this action inside. Supports ${var}"),
-    url: z.string().optional().describe("Target URL for navigate, or URL pattern for waitForURL/waitForResponse. Supports ${var}"),
-    text: z.string().optional().describe("Input text or expected text depending on action. Supports ${var} interpolation"),
-    key: z.string().optional().describe("Keyboard key for press"),
-    milliseconds: z.number().optional().describe("Delay in milliseconds for wait"),
-    delay: z.number().default(50).describe("Delay between keystrokes for type"),
-    timeout: z.number().default(5000).describe("Timeout in milliseconds"),
+      .describe("Action to run"),
+    name: z.string().optional().describe("Step label"),
+    selector: z.string().optional().describe("CSS selector"),
+    frame: z.string().optional().describe("iframe selector to scope this step into"),
+    url: z.string().optional().describe("URL for navigate, or pattern for waitForURL/waitForResponse"),
+    text: z.string().optional().describe("Text to type, or expected text for assert*"),
+    key: z.string().optional().describe("Key for press"),
+    milliseconds: z.number().optional().describe("Delay for wait"),
+    delay: z.number().default(50).describe("Keystroke delay, ms"),
+    timeout: z.number().default(5000).describe("Step timeout, ms"),
     waitUntil: waitUntilSchema.describe("Navigation wait strategy"),
-    fullPage: z.boolean().default(false).describe("Capture full page for screenshot"),
-    filepath: z.string().optional().describe("Absolute path for saved screenshot. Supports ${var}"),
-    x: z.number().default(0).describe("Horizontal scroll amount"),
-    y: z.number().default(0).describe("Vertical scroll amount"),
-    script: z.string().optional().describe("JavaScript to run inside browser context. Supports ${var}"),
-    variable: z.string().optional().describe("Store the step result under this key for use as ${key} in later steps"),
-    attribute: z.string().optional().describe("Attribute name for extractAttribute or assertAttribute"),
-    count: z.number().optional().describe("Expected number of matching elements for assertCount"),
-    checked: z.boolean().optional().describe("Expected checked state for assertChecked"),
-    tabIndex: z.number().optional().describe("Zero-based tab index for switchTab"),
+    fullPage: z.boolean().default(false).describe("Full-page screenshot"),
+    filepath: z.string().optional().describe("Absolute path for screenshot"),
+    x: z.number().default(0).describe("Scroll px, horizontal"),
+    y: z.number().default(0).describe("Scroll px, vertical"),
+    script: z.string().optional().describe("JS to run in the page"),
+    variable: z.string().optional().describe("Save result as ${key} for later steps"),
+    attribute: z.string().optional().describe("Attribute name"),
+    count: z.number().optional().describe("Expected count for assertCount"),
+    checked: z.boolean().optional().describe("Expected state for assertChecked"),
+    tabIndex: z.number().optional().describe("Tab index for switchTab"),
     match: z
       .enum(["equals", "includes", "regex"])
       .default("includes")
-      .describe("Comparison mode for assertText/assertUrl/assertAttribute/assertValue/waitForURL/waitForResponse"),
-    selectedValue: z.string().optional().describe("Value to select for selectOption. Supports ${var}"),
-    continueOnError: z.boolean().default(false).describe("Continue even if this step fails (soft assertion)"),
+      .describe("Comparison mode for assert*/waitForURL/waitForResponse"),
+    selectedValue: z.string().optional().describe("Value for selectOption"),
+    maxLength: z.number().default(2000).describe("Max chars returned by extract*/evaluate"),
+    continueOnError: z.boolean().default(false).describe("Keep going if this step fails"),
   })
   .superRefine((step, ctx) => {
-    const requireField = (field: keyof typeof step, message: string) => {
-      if (step[field] === undefined || step[field] === "") {
+    // Assertions may legitimately expect an empty string ("this field is
+    // blank"), so only there does "" count as a real value.
+    const requireField = (field: keyof typeof step, message: string, allowEmpty = false) => {
+      const value = step[field];
+      if (value === undefined || (!allowEmpty && value === "")) {
         ctx.addIssue({ code: z.ZodIssueCode.custom, message, path: [field] });
       }
     };
@@ -151,10 +410,10 @@ const automationStepSchema = z
         requireField("attribute", "attribute is required for extractAttribute");
         break;
       case "assertText":
-        requireField("text", "text is required for assertText");
+        requireField("text", "text is required for assertText", true);
         break;
       case "assertUrl":
-        requireField("text", "text is required for assertUrl");
+        requireField("text", "text is required for assertUrl", true);
         break;
       case "assertCount":
         requireField("selector", "selector is required for assertCount");
@@ -165,11 +424,11 @@ const automationStepSchema = z
       case "assertAttribute":
         requireField("selector", "selector is required for assertAttribute");
         requireField("attribute", "attribute is required for assertAttribute");
-        requireField("text", "text is required for assertAttribute");
+        requireField("text", "text is required for assertAttribute", true);
         break;
       case "assertValue":
         requireField("selector", "selector is required for assertValue");
-        requireField("text", "text is required for assertValue");
+        requireField("text", "text is required for assertValue", true);
         break;
       case "assertChecked":
         requireField("selector", "selector is required for assertChecked");
@@ -191,14 +450,13 @@ const automationStepSchema = z
       case "screenshot":
         requireField("filepath", "filepath is required for screenshot");
         break;
+      case "styles":
+        requireField("selector", "selector is required for styles");
+        break;
       default:
         break;
     }
   });
-
-function createStepLabel(step: z.infer<typeof automationStepSchema>, index: number): string {
-  return step.name || `${index + 1}:${step.action}`;
-}
 
 function textMatches(actual: string, expected: string, match: "equals" | "includes" | "regex"): boolean {
   if (match === "equals") return actual === expected;
@@ -253,7 +511,6 @@ async function runBrowserFlow(
 
   for (const [index, rawStep] of steps.entries()) {
     const step = interpolateStep(rawStep, variables);
-    const label = createStepLabel(step, index);
 
     // Scope element actions to an iframe when `frame` is set, otherwise the page.
     const scope = step.frame ? page.frameLocator(step.frame) : page;
@@ -297,7 +554,7 @@ async function runBrowserFlow(
           value = { unchecked: step.selector };
           break;
         case "press":
-          await page.press("body", step.key!);
+          await page.keyboard.press(step.key!);
           value = { key: step.key };
           break;
         case "wait":
@@ -348,13 +605,22 @@ async function runBrowserFlow(
           await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
           value = { position: "bottom" };
           break;
+        case "goBack":
+          await page.goBack({ waitUntil: step.waitUntil, timeout: step.timeout });
+          break;
+        case "goForward":
+          await page.goForward({ waitUntil: step.waitUntil, timeout: step.timeout });
+          break;
+        case "reload":
+          await page.reload({ waitUntil: step.waitUntil, timeout: step.timeout });
+          break;
         case "extractText": {
           const target = locator ?? scope.locator("body");
-          value = (await target.textContent({ timeout: step.timeout })) ?? "";
+          value = collapse((await target.textContent({ timeout: step.timeout })) ?? "");
           break;
         }
         case "extractHtml":
-          value = await locator!.innerHTML({ timeout: step.timeout });
+          value = compactHtml(await locator!.innerHTML({ timeout: step.timeout }));
           break;
         case "extractAttribute":
           value = await locator!.getAttribute(step.attribute!, { timeout: step.timeout });
@@ -453,6 +719,11 @@ async function runBrowserFlow(
         case "evaluate":
           value = await page.evaluate(step.script!);
           break;
+        case "snapshot":
+        case "styles":
+        case "audit":
+          value = await runInspect(page, step.action, step.selector ?? "", 60);
+          break;
         case "screenshot": {
           const buffer = await page.screenshot({ fullPage: step.fullPage });
           await writeFile(step.filepath!, buffer);
@@ -462,23 +733,27 @@ async function runBrowserFlow(
       }
 
       if (step.variable) {
-        variables[step.variable] = value;
+        variables[step.variable] = clampValue(value, step.maxLength);
       }
 
+      // Echoing back what the step itself said (clicked selector, scroll
+      // offsets, ...) is pure token cost: `ok` already confirms it ran, and a
+      // stored value is reported once through `variables`.
+      const keepValue = VERBOSE_ACTIONS.has(step.action) && !step.variable;
       results.push({
-        index,
-        name: label,
+        i: index,
         action: step.action,
         ok: true,
-        value,
+        ...(step.name ? { name: step.name } : {}),
+        ...(keepValue ? { value: clampValue(value, step.maxLength) } : {}),
       });
     } catch (err) {
-      const error = err instanceof Error ? err.message : String(err);
+      const error = shortError(err);
       results.push({
-        index,
-        name: label,
+        i: index,
         action: step.action,
         ok: false,
+        ...(step.name ? { name: step.name } : {}),
         error,
       });
 
@@ -487,24 +762,31 @@ async function runBrowserFlow(
       }
 
       if (stopOnError) {
-        return {
-          success: false,
-          failedStep: index,
-          error,
-          results,
-          variables,
-          currentUrl: page.url(),
-          title: await page.title(),
-        };
+        return summarizeFlow(results, variables, page, index);
       }
     }
   }
 
+  return summarizeFlow(results, variables, page);
+}
+
+// Steps that neither failed, carried a value, nor were named add nothing the
+// caller cannot read off its own request, so they are counted, not listed.
+async function summarizeFlow(
+  results: Array<Record<string, unknown>>,
+  variables: Record<string, unknown>,
+  page: Awaited<ReturnType<typeof getPage>>,
+  failedStep?: number,
+) {
+  const passed = results.filter((result) => result.ok === true).length;
+  const notable = results.filter((result) => result.ok !== true || "value" in result || "name" in result);
   return {
-    success: results.every((result) => result.ok === true),
-    results,
-    variables,
-    currentUrl: page.url(),
+    success: failedStep === undefined && passed === results.length,
+    steps: `${passed}/${results.length}`,
+    ...(failedStep !== undefined ? { failedStep } : {}),
+    ...(notable.length ? { results: notable } : {}),
+    ...(Object.keys(variables).length ? { variables } : {}),
+    url: page.url(),
     title: await page.title(),
   };
 }
@@ -512,9 +794,9 @@ async function runBrowserFlow(
 const tools = [
   createTool({
     name: "browser_set_headless",
-    description: "Set whether browser runs in headless mode. Use true for automation/testing, false to see the browser window.",
+    description: "Show or hide the browser window.",
     schema: {
-      headless: z.boolean().describe("true = headless (no visible window), false = show browser window"),
+      headless: z.boolean().describe("true = no window, false = visible window"),
     },
     handler: async ({ headless }) => {
       const restarted = await setHeadless(headless);
@@ -523,10 +805,10 @@ const tools = [
   }),
   createTool({
     name: "browser_navigate",
-    description: "Go to a URL (single one-off action). Supports any HTTP/HTTPS URL. If the task has further steps after loading, prefer browser_run_flow instead of chaining single actions.",
+    description: "Go to a URL. One-off only; for anything with further steps use browser_run_flow.",
     schema: {
-      url: z.string().describe("Full URL including https:// (e.g., https://example.com)"),
-      waitUntil: waitUntilSchema.describe("When to consider navigation complete: networkidle (recommended) waits for all requests to finish"),
+      url: z.string().describe("Full URL including https://"),
+      waitUntil: waitUntilSchema.describe("When navigation counts as done"),
     },
     handler: async ({ url, waitUntil }) => {
       const page = await getPage();
@@ -536,102 +818,142 @@ const tools = [
   }),
   createTool({
     name: "browser_click",
-    description: "Click a button, link, or any element (single one-off action). Requires the element's CSS selector. For a multi-step interaction, prefer browser_run_flow.",
+    description: "Click an element. One-off only; for a multi-step interaction use browser_run_flow.",
     schema: {
-      selector: z.string().describe("CSS selector of the element to click (e.g., button, a, #id, .class)"),
+      selector: z.string().describe("CSS selector"),
     },
     handler: async ({ selector }) => {
-      await (await getPage()).click(selector);
+      await (await getPage()).locator(selector).first().click();
       return success({});
     },
   }),
   createTool({
     name: "browser_type",
-    description: "Type text into an input field or text area (single one-off action). For filling a form with multiple fields, prefer browser_run_flow.",
+    description: "Type into one field. For a whole form use browser_run_flow.",
     schema: {
-      selector: z.string().describe("CSS selector of the input field (e.g., input, textarea, #search)"),
+      selector: z.string().describe("CSS selector"),
       text: z.string().describe("Text to type"),
-      delay: z.number().default(50).describe("Delay between keystrokes in milliseconds (default: 50)"),
+      delay: z.number().default(50).describe("Keystroke delay, ms"),
     },
     handler: async ({ selector, text, delay }) => {
-      await (await getPage()).type(selector, text, { delay });
+      await (await getPage()).locator(selector).first().pressSequentially(text, { delay });
       return success({});
     },
   }),
   createTool({
     name: "browser_get_content",
-    description: "Get the raw HTML source of the current page. Use when you need the full HTML structure for scraping or analysis.",
-    schema: {},
-    handler: async () => ({ html: await (await getPage()).content() }),
+    description: "Get page HTML, with scripts/styles/comments stripped. Scope with a selector and keep maxLength low; prefer browser_get_text when only the wording matters.",
+    schema: {
+      selector: z.string().optional().describe("Limit to this element. Defaults to the whole page"),
+      maxLength: z.number().default(20000).describe("Max chars returned"),
+      raw: z.boolean().default(false).describe("Skip stripping and return the HTML untouched"),
+    },
+    handler: async ({ selector, maxLength, raw }) => {
+      const page = await getPage();
+      const html = selector
+        ? await page.locator(selector).first().innerHTML()
+        : await page.content();
+      return { html: clamp(raw ? html : compactHtml(html), maxLength) };
+    },
   }),
   createTool({
     name: "browser_get_text",
-    description: "Extract visible text from the page or a specific element. Use for reading content like article text, prices, or descriptions.",
+    description: "Read visible text from the page or one element. Cheaper than browser_get_content.",
     schema: {
-      selector: z.string().optional().describe("CSS selector to extract text from specific element. Defaults to entire page."),
+      selector: z.string().optional().describe("Element to read. Defaults to the whole page"),
+      maxLength: z.number().default(20000).describe("Max chars returned"),
     },
-    handler: async ({ selector }) => {
-      const el = selector || "body";
-      const text = await (await getPage()).$eval(el, (el: HTMLElement) => el.textContent);
-      return { text: text ?? "" };
+    handler: async ({ selector, maxLength }) => {
+      const page = await getPage();
+      const text = await page.locator(selector || "body").first().textContent();
+      return { text: clamp(collapse(text ?? ""), maxLength) };
     },
+  }),
+  createTool({
+    name: "browser_inspect",
+    description: "Read the UI as text instead of a screenshot. snapshot: visible interactive elements, each stamped with data-ref so you can click it as [data-ref=\"e5\"]. styles: computed style and geometry. audit: contrast, overflow, clipped text, covered or undersized controls, broken images. Screenshot only for genuinely visual judgement.",
+    schema: {
+      mode: z.enum(["snapshot", "styles", "audit"]).default("snapshot").describe("What to read"),
+      selector: z.string().optional().describe("Root for snapshot/audit, target elements for styles"),
+      max: z.number().default(60).describe("Max elements or issues"),
+      maxLength: z.number().default(8000).describe("Max chars returned"),
+    },
+    handler: async ({ mode, selector, max, maxLength }) => ({
+      [mode]: clamp(await runInspect(await getPage(), mode, selector ?? "", max), maxLength),
+    }),
   }),
   createTool({
     name: "browser_evaluate",
-    description: "Run custom JavaScript in the page context. Use for complex interactions, data extraction, or DOM manipulation that other tools can't handle.",
+    description: "Run JavaScript in the page. Return only the data you need, not whole DOM dumps.",
     schema: {
-      script: z.string().describe("JavaScript code to execute. Can return values. Runs in browser context (window, document available)."),
+      script: z.string().describe("JS to run; its return value comes back"),
+      maxLength: z.number().default(20000).describe("Max chars returned"),
     },
-    handler: async ({ script }) => ({ result: await (await getPage()).evaluate(script) }),
+    handler: async ({ script, maxLength }) => ({
+      result: clampValue(await (await getPage()).evaluate(script), maxLength),
+    }),
   }),
   createTool({
     name: "browser_search",
-    description: "Search the web and get ranked results with titles, URLs, and snippets. Good for research, finding pages, or checking information.",
+    description: "Search the web and get titles, URLs and snippets.",
     schema: {
-      query: z.string().describe("Search query/keywords"),
-      engine: z.enum(["google", "duckduckgo", "bing"]).default("duckduckgo").describe("Search engine to use: duckduckgo (default, no tracking), google (more results), bing (alternative)"),
+      query: z.string().describe("Search keywords"),
+      engine: z.enum(["google", "duckduckgo", "bing"]).default("duckduckgo").describe("Search engine"),
+      limit: z.number().default(10).describe("Max results"),
     },
-    handler: async ({ query, engine }) => {
+    handler: async ({ query, engine, limit }) => {
       const page = await getPage();
-      const searchUrl = SearchEngines[engine](encodeURIComponent(query));
-      await page.goto(searchUrl, { waitUntil: "networkidle" });
+      const config = SearchEngines[engine];
+      await page.goto(config.url(encodeURIComponent(query)), { waitUntil: "networkidle" });
 
-      const results = await page.evaluate(() => {
+      const results = await page.evaluate(({ item, link, title, snippet, max }) => {
+        const clean = (value: string | null | undefined) => value?.replace(/\s+/g, " ").trim() ?? "";
+
+        // Every engine routes result links through its own redirector; recover
+        // the real target from the redirect payload or the displayed citation
+        // rather than discarding the result.
+        const resolve = (anchor: HTMLAnchorElement, node: Element) => {
+          if (!anchor.href.includes(location.host)) return anchor.href;
+          const params = new URL(anchor.href).searchParams;
+          for (const key of ["u", "url", "q"]) {
+            const raw = params.get(key);
+            if (!raw) continue;
+            if (/^https?:/.test(raw)) return raw;
+            try {
+              const decoded = atob(raw.replace(/^a1/, "").replace(/-/g, "+").replace(/_/g, "/"));
+              if (/^https?:/.test(decoded)) return decoded;
+            } catch {}
+          }
+          // Google's citation shortens the breadcrumb without marking it, so it
+          // cannot be rebuilt into a URL. Hand back the redirect, which is
+          // opaque but navigable, rather than a plausible-looking wrong path.
+          return anchor.href;
+        };
+
         const out: Array<{ title: string; url: string; snippet: string }> = [];
-        const selectors = ["div.g a[href^='http']", "div[data-srg] a[href^='http']", ".result a[href^='http']"];
+        const seen = new Set<string>();
 
-        for (const sel of selectors) {
-          document.querySelectorAll<HTMLAnchorElement>(sel).forEach((a) => {
-            if (!a.href || /google|bing|duckduckgo/.test(a.href)) return;
-            const titleEl = a.querySelector("h3") || a;
-            out.push({
-              title: titleEl.textContent?.trim() ?? "",
-              url: a.href,
-              snippet: a.textContent?.trim() ?? "",
-            });
-          });
-          if (out.length) break;
+        for (const node of document.querySelectorAll(item)) {
+          if (out.length >= max) break;
+          const anchor = node.querySelector<HTMLAnchorElement>(link);
+          if (!anchor?.href || !/^https?:/.test(anchor.href)) continue;
+          const url = resolve(anchor, node);
+          if (seen.has(url)) continue;
+          seen.add(url);
+          const heading = clean((title ? node.querySelector(title) : anchor)?.textContent);
+          const described = clean(node.querySelector(snippet)?.textContent)
+            || clean(node.textContent).replace(heading, "");
+          out.push({ title: heading, url, snippet: described.slice(0, 200).trim() });
         }
-        return out.slice(0, 10);
-      });
+        return out;
+      }, { item: config.item, link: config.link, title: config.title as string, snippet: config.snippet, max: limit });
 
-      return success({ engine, query, results });
-    },
-  }),
-  createTool({
-    name: "browser_wait",
-    description: "Pause execution for a specified time. Use when you need to wait for page animations, lazy loading, or after clicking something that triggers async updates.",
-    schema: {
-      milliseconds: z.number().describe("Time to wait in milliseconds (e.g., 1000 = 1 second)"),
-    },
-    handler: async ({ milliseconds }) => {
-      await new Promise((resolve) => setTimeout(resolve, milliseconds));
-      return success({ waited: milliseconds });
+      return success({ results });
     },
   }),
   createTool({
     name: "browser_close",
-    description: "Close the browser and free up resources. Call this when you're done with browser operations to clean up.",
+    description: "Close the browser and free resources.",
     schema: {},
     handler: async () => {
       await closeBrowser();
@@ -640,10 +962,10 @@ const tools = [
   }),
   createTool({
     name: "browser_save_screenshot",
-    description: "Take a screenshot of the current page and save to a file. Use to capture visual state, verify page content, or create records.",
+    description: "Screenshot the page to a file. Use browser_inspect to read the UI as text; screenshot only when the judgement needs eyes.",
     schema: {
-      filepath: z.string().describe("Full path where to save the image (e.g., /tmp/screenshot.png)"),
-      fullPage: z.boolean().default(false).describe("true = capture entire scrollable page, false = only visible viewport"),
+      filepath: z.string().describe("Absolute path for the .png"),
+      fullPage: z.boolean().default(false).describe("Capture the whole scrollable page"),
     },
     handler: async ({ filepath, fullPage }) => {
       const buffer = await (await getPage()).screenshot({ fullPage });
@@ -653,11 +975,11 @@ const tools = [
   }),
   createTool({
     name: "browser_print_to_pdf",
-    description: "Save the current page as a PDF document. Useful for archiving pages, generating reports, or preserving content in printable format.",
+    description: "Save the page as a PDF.",
     schema: {
-      filepath: z.string().describe("Full path where to save the PDF (e.g., /tmp/page.pdf)"),
-      landscape: z.boolean().default(false).describe("true = landscape orientation, false = portrait"),
-      printBackground: z.boolean().default(true).describe("true = include background colors/images, false = white background only"),
+      filepath: z.string().describe("Absolute path for the .pdf"),
+      landscape: z.boolean().default(false).describe("Landscape orientation"),
+      printBackground: z.boolean().default(true).describe("Include background colors and images"),
     },
     handler: async ({ filepath, landscape, printBackground }) => {
       const pdf = await (await getPage()).pdf({
@@ -670,72 +992,20 @@ const tools = [
     },
   }),
   createTool({
-    name: "browser_press",
-    description: "Press a keyboard key. Use for Enter, Tab, Escape, Arrow keys, etc.",
-    schema: {
-      key: z.string().describe("Key to press: Enter, Tab, Escape, ArrowUp, ArrowDown, ArrowLeft, ArrowRight, Backspace, Delete, etc."),
-    },
-    handler: async ({ key }) => {
-      await pressKey(key);
-      return success({ key });
-    },
-  }),
-  createTool({
-    name: "browser_scroll",
-    description: "Scroll the page by x/y pixels. Positive values scroll down/right, negative scroll up/left.",
-    schema: {
-      x: z.number().default(0).describe("Horizontal scroll amount in pixels (positive = right, negative = left)"),
-      y: z.number().describe("Vertical scroll amount in pixels (positive = down, negative = up)"),
-    },
-    handler: async ({ x, y }) => {
-      await scrollPage(x, y);
-      return success({ x, y });
-    },
-  }),
-  createTool({
-    name: "browser_scroll_to_top",
-    description: "Scroll to the top of the page.",
-    schema: {},
-    handler: async () => {
-      await scrollToTop();
-      return success({});
-    },
-  }),
-  createTool({
-    name: "browser_scroll_to_bottom",
-    description: "Scroll to the bottom of the page.",
-    schema: {},
-    handler: async () => {
-      await scrollToBottom();
-      return success({});
-    },
-  }),
-  createTool({
-    name: "browser_hover",
-    description: "Hover over an element. Useful for dropdowns, tooltips, and menus that appear on hover.",
-    schema: {
-      selector: z.string().describe("CSS selector of the element to hover over"),
-    },
-    handler: async ({ selector }) => {
-      await hoverElement(selector);
-      return success({});
-    },
-  }),
-  createTool({
     name: "browser_go_back",
-    description: "Navigate back to the previous page in browser history.",
+    description: "Go back in history.",
     schema: {},
     handler: async () => {
-      await goBack();
+      await (await getPage()).goBack();
       return success({});
     },
   }),
   createTool({
     name: "browser_go_forward",
-    description: "Navigate forward in browser history.",
+    description: "Go forward in history.",
     schema: {},
     handler: async () => {
-      await goForward();
+      await (await getPage()).goForward();
       return success({});
     },
   }),
@@ -744,25 +1014,16 @@ const tools = [
     description: "Reload the current page.",
     schema: {},
     handler: async () => {
-      await reload();
+      await (await getPage()).reload();
       return success({});
     },
   }),
   createTool({
     name: "browser_run_flow",
-    description: "PREFERRED tool for ANY browser task with 2+ steps — use this instead of chaining single-action tools. Runs an ordered list of actions in ONE call on the same page: navigation, form filling, scraping, extraction, assertions, screenshots, and automation tests. Supports ${var} interpolation between steps (store with `variable`, reuse in any string field), iframe scoping via `frame`, multi-tab control (switchTab/waitForTab/closeTab), network waits (waitForURL/waitForResponse), and assertions (assertText/assertVisible/assertNotVisible/assertUrl/assertCount/assertAttribute/assertValue/assertChecked). For tests, set stopOnError: true.",
+    description: "PREFERRED for ANY browser task of 2+ steps — use it instead of chaining single-action tools. Runs ordered actions in one call on the same page: navigation, forms, scraping, assertions, snapshot/styles/audit, screenshots. It is also the only place for wait, press, hover, scroll and tab control. Open an unfamiliar page with a `snapshot` step, then act on the refs it stamps via [data-ref=\"e5\"]. Every string field supports ${var} from a prior step's `variable`; `frame` scopes into an iframe. Results are compacted: passing steps report only a count, so use `variable` or an extract* step for anything you need back.",
     schema: {
-      steps: z.array(automationStepSchema).min(1).describe("Ordered list of browser actions to run in a single multi-step workflow"),
-      stopOnError: z.boolean().default(true).describe("Stop immediately when a step fails. Recommended for tests or strict workflows."),
-    },
-    handler: async ({ steps, stopOnError }) => runBrowserFlow(steps, stopOnError),
-  }),
-  createTool({
-    name: "browser_run_automation",
-    description: "Backward-compatible alias for browser_run_flow. Use browser_run_flow for new integrations and general multi-step browser workflows.",
-    schema: {
-      steps: z.array(automationStepSchema).min(1).describe("Ordered list of browser actions to run in a single multi-step workflow"),
-      stopOnError: z.boolean().default(true).describe("Stop immediately when a step fails. Recommended for tests or strict workflows."),
+      steps: z.array(automationStepSchema).min(1).describe("Ordered actions to run"),
+      stopOnError: z.boolean().default(true).describe("Stop at the first failing step"),
     },
     handler: async ({ steps, stopOnError }) => runBrowserFlow(steps, stopOnError),
   }),
@@ -782,10 +1043,7 @@ export function registerTools(server: McpServer): void {
         try {
           return toResult(await tool.handler(args as never));
         } catch (err) {
-          return toResult(
-            { error: err instanceof Error ? err.message : String(err) },
-            true,
-          );
+          return toResult({ error: shortError(err) }, true);
         }
       },
     );
