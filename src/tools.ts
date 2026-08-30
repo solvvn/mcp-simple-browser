@@ -2,7 +2,8 @@ import { z } from "zod";
 import { writeFile } from "fs/promises";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
-import { closeBrowser, getPage, setPage, setHeadless, isHeadless } from "./browser.js";
+import { closeBrowser, getPage, setPage, setHeadless, isHeadless, setViewport, getViewport } from "./browser.js";
+import type { Viewport } from "./browser.js";
 
 type ToolHandler<T extends z.ZodRawShape> = (args: z.infer<z.ZodObject<T>>) => Promise<unknown>;
 
@@ -53,7 +54,7 @@ function shortError(err: unknown): string {
 
 // Only these actions return something the model cannot already infer from the
 // step it sent; everything else is confirmed by `ok` alone.
-const VERBOSE_ACTIONS = new Set(["extractText", "extractHtml", "extractAttribute", "evaluate", "waitForResponse", "waitForTab", "switchTab", "snapshot", "styles", "audit"]);
+const VERBOSE_ACTIONS = new Set(["extractText", "extractHtml", "extractAttribute", "evaluate", "waitForResponse", "waitForTab", "switchTab", "snapshot", "styles", "audit", "viewport"]);
 
 function clampValue(value: unknown, max: number): unknown {
   if (typeof value === "string") return clamp(value, max);
@@ -85,6 +86,20 @@ const SearchEngines = {
     snippet: ".b_caption p, .b_algoSlug",
   },
 } as const;
+
+// ---------------------------------------------------------------------------
+// Viewport: the width a responsive layout is measured at.
+// ---------------------------------------------------------------------------
+
+// At or below this width the page is being looked at as a touch device, which
+// is what makes `pointer: coarse` and `hover: none` match and hides or exposes
+// hover-only affordances.
+const TOUCH_MAX_WIDTH = 768;
+
+function viewportFor(width: number, height?: number, mobile?: boolean, scale = 1): Viewport {
+  const touch = mobile ?? width <= TOUCH_MAX_WIDTH;
+  return { width, height: height || (touch ? 844 : 900), scale, mobile: touch };
+}
 
 // ---------------------------------------------------------------------------
 // Page inspection: text descriptions of the UI that stand in for a screenshot
@@ -276,6 +291,49 @@ async function runInspect(
   });
 }
 
+// Reporting each width's findings in full is mostly repetition: an issue that
+// holds at every width is one line, and the interesting ones are those tagged
+// with the widths where they actually appear.
+async function inspectWidths(
+  page: Awaited<ReturnType<typeof getPage>>,
+  mode: InspectArgs["mode"],
+  selector: string,
+  max: number,
+  widths: number[],
+): Promise<string> {
+  const targets = [...new Set(widths)].sort((a, b) => a - b);
+  const previous = getViewport();
+  const seen = new Map<string, number[]>();
+
+  try {
+    for (const width of targets) {
+      await setViewport(viewportFor(width));
+      // Two frames: one for reflow, one for any ResizeObserver-driven relayout.
+      await page.evaluate(
+        () => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve(null)))),
+      );
+      const report = await runInspect(page, mode, selector, max);
+      for (const raw of report.split("\n")) {
+        // snapshot numbers its refs per run, so the same control is e3 at one
+        // width and e7 at another; drop the ref or nothing would ever group.
+        const line = mode === "snapshot" ? raw.replace(/^e\d+ /, "") : raw;
+        if (!line.trim()) continue;
+        const at = seen.get(line);
+        if (at) at.push(width);
+        else seen.set(line, [width]);
+      }
+    }
+  } finally {
+    await setViewport(previous);
+  }
+
+  const everywhere = (at: number[]) => at.length === targets.length;
+  return [...seen]
+    .sort(([, a], [, b]) => Number(everywhere(b)) - Number(everywhere(a)) || a[0] - b[0])
+    .map(([line, at]) => `[${everywhere(at) ? "all" : at.join(",")}] ${line}`)
+    .join("\n");
+}
+
 const waitUntilSchema = z
   .enum(["load", "domcontentloaded", "networkidle", "commit"])
   .default("networkidle");
@@ -324,6 +382,7 @@ const automationStepSchema = z
         "snapshot",
         "styles",
         "audit",
+        "viewport",
       ])
       .describe("Action to run"),
     name: z.string().optional().describe("Step label"),
@@ -338,6 +397,8 @@ const automationStepSchema = z
     waitUntil: waitUntilSchema.describe("Navigation wait strategy"),
     fullPage: z.boolean().default(false).describe("Full-page screenshot"),
     filepath: z.string().optional().describe("Absolute path for screenshot"),
+    width: z.number().optional().describe("Viewport width in CSS px; 0 resets"),
+    height: z.number().optional().describe("Viewport height in CSS px"),
     x: z.number().default(0).describe("Scroll px, horizontal"),
     y: z.number().default(0).describe("Scroll px, vertical"),
     script: z.string().optional().describe("JS to run in the page"),
@@ -452,6 +513,9 @@ const automationStepSchema = z
         break;
       case "styles":
         requireField("selector", "selector is required for styles");
+        break;
+      case "viewport":
+        requireField("width", "width is required for viewport (0 resets)");
         break;
       default:
         break;
@@ -690,7 +754,7 @@ async function runBrowserFlow(
           }
           page = target;
           await page.bringToFront();
-          setPage(page);
+          await setPage(page);
           value = { tabIndex: step.tabIndex, url: page.url() };
           break;
         }
@@ -699,7 +763,7 @@ async function runBrowserFlow(
           await target.waitForLoadState(toLoadState(step.waitUntil), { timeout: step.timeout }).catch(() => {});
           page = target;
           await page.bringToFront();
-          setPage(page);
+          await setPage(page);
           value = { url: page.url(), title: await page.title() };
           break;
         }
@@ -712,7 +776,7 @@ async function runBrowserFlow(
           }
           page = next;
           await page.bringToFront();
-          setPage(page);
+          await setPage(page);
           value = { closed: true, url: page.url() };
           break;
         }
@@ -724,6 +788,15 @@ async function runBrowserFlow(
         case "audit":
           value = await runInspect(page, step.action, step.selector ?? "", 60);
           break;
+        case "viewport": {
+          await setViewport(step.width! > 0 ? viewportFor(step.width!, step.height) : null);
+          value = await page.evaluate(() => ({
+            width: window.innerWidth,
+            height: window.innerHeight,
+            touch: matchMedia("(pointer: coarse)").matches,
+          }));
+          break;
+        }
         case "screenshot": {
           const buffer = await page.screenshot({ fullPage: step.fullPage });
           await writeFile(step.filepath!, buffer);
@@ -804,6 +877,28 @@ const tools = [
     },
   }),
   createTool({
+    name: "browser_set_viewport",
+    description: "Resize the page to a CSS-pixel width to check a responsive breakpoint. Width <= 768 also emulates touch, so `pointer: coarse` and `hover: none` match. Sticks across navigation, new tabs and headless toggles until reset. To compare several widths at once, pass `widths` to browser_inspect instead.",
+    schema: {
+      width: z.number().describe("CSS px wide, e.g. 320/360/390/768/1024/1440. 0 resets to the window size"),
+      height: z.number().optional().describe("CSS px tall. Default 844 at touch widths, else 900"),
+      mobile: z.boolean().optional().describe("Touch emulation. Default: width <= 768"),
+      scale: z.number().default(1).describe("devicePixelRatio"),
+    },
+    handler: async ({ width, height, mobile, scale }) => {
+      const page = await getPage();
+      await setViewport(width > 0 ? viewportFor(width, height, mobile, scale) : null);
+      // Report what the page actually sees, so a size the site overrides shows up.
+      const actual = await page.evaluate(() => ({
+        width: window.innerWidth,
+        height: window.innerHeight,
+        dpr: window.devicePixelRatio,
+        touch: matchMedia("(pointer: coarse)").matches,
+      }));
+      return success({ ...actual, override: getViewport() !== null });
+    },
+  }),
+  createTool({
     name: "browser_navigate",
     description: "Go to a URL. One-off only; for anything with further steps use browser_run_flow.",
     schema: {
@@ -877,10 +972,18 @@ const tools = [
       selector: z.string().optional().describe("Root for snapshot/audit, target elements for styles"),
       max: z.number().default(60).describe("Max elements or issues"),
       maxLength: z.number().default(8000).describe("Max chars returned"),
+      widths: z
+        .array(z.number())
+        .optional()
+        .describe("Re-run at each CSS-px width and tag every line with where it occurs, e.g. [360,768,1440]. Restores the viewport after"),
     },
-    handler: async ({ mode, selector, max, maxLength }) => ({
-      [mode]: clamp(await runInspect(await getPage(), mode, selector ?? "", max), maxLength),
-    }),
+    handler: async ({ mode, selector, max, maxLength, widths }) => {
+      const page = await getPage();
+      const report = widths?.length
+        ? await inspectWidths(page, mode, selector ?? "", max, widths)
+        : await runInspect(page, mode, selector ?? "", max);
+      return { [mode]: clamp(report, maxLength) };
+    },
   }),
   createTool({
     name: "browser_evaluate",
@@ -1020,7 +1123,7 @@ const tools = [
   }),
   createTool({
     name: "browser_run_flow",
-    description: "PREFERRED for ANY browser task of 2+ steps — use it instead of chaining single-action tools. Runs ordered actions in one call on the same page: navigation, forms, scraping, assertions, snapshot/styles/audit, screenshots. It is also the only place for wait, press, hover, scroll and tab control. Open an unfamiliar page with a `snapshot` step, then act on the refs it stamps via [data-ref=\"e5\"]. Every string field supports ${var} from a prior step's `variable`; `frame` scopes into an iframe. Results are compacted: passing steps report only a count, so use `variable` or an extract* step for anything you need back.",
+    description: "PREFERRED for ANY browser task of 2+ steps — use it instead of chaining single-action tools. Runs ordered actions in one call on the same page: navigation, forms, scraping, assertions, snapshot/styles/audit, screenshots. It is also the only place for wait, press, hover, scroll, viewport and tab control. Open an unfamiliar page with a `snapshot` step, then act on the refs it stamps via [data-ref=\"e5\"]. Every string field supports ${var} from a prior step's `variable`; `frame` scopes into an iframe. Results are compacted: passing steps report only a count, so use `variable` or an extract* step for anything you need back.",
     schema: {
       steps: z.array(automationStepSchema).min(1).describe("Ordered actions to run"),
       stopOnError: z.boolean().default(true).describe("Stop at the first failing step"),

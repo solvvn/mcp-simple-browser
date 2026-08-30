@@ -87,6 +87,7 @@ Add to your Claude Desktop config:
 | Tool | Description |
 |------|-------------|
 | `browser_navigate` | Navigate to a URL and wait for it to load |
+| `browser_set_viewport` | Resize the page to a CSS-pixel width to check a breakpoint |
 | `browser_save_screenshot` | Take a screenshot and save to file |
 | `browser_click` | Click an element by CSS selector |
 | `browser_type` | Type text into an input field |
@@ -151,6 +152,34 @@ controls covered by another element, targets under 24x24, and broken images. A
 control hidden behind a nearly transparent overlay is invisible in a screenshot
 but caught here.
 
+### `widths` — the same audit at every breakpoint
+
+```
+browser_inspect { mode: "audit", widths: [320, 360, 390, 768, 1024, 1440] }
+```
+
+```
+[all] contrast p.faint: 1.92:1 below 4.5 (rgb(187, 187, 187))
+[all] tap-target button.tiny: 20x20px under 24x24
+[320] overflow-x: page is 416px wide vs viewport 320px
+[320] offscreen div.wide: 96px past the right edge
+[360] overflow-x: page is 416px wide vs viewport 360px
+[360] offscreen div.wide: 56px past the right edge
+```
+
+Each width is measured in turn and every line is tagged with where it occurs, so
+`[all]` separates what is always broken from what only breaks on a phone. The
+viewport in force before the call is restored afterwards.
+
+It works for `snapshot` too, which answers a different question — what the layout
+hides at each size:
+
+```
+[all]  a "Home"
+[1440] a "Pricing"          (hidden under 800px)
+[1440] a "Tooltip menu"     (hover-only, gone at touch widths)
+```
+
 ### `mode: "styles"` — how an element is actually rendered
 
 ```
@@ -170,6 +199,39 @@ button.btn [200x44 @20,86] display:block; position:absolute; padding:1px 6px;
 Aesthetic judgement, imagery and icon content, animation and transitional
 states, and anything drawn in canvas, WebGL or video. `browser_inspect` measures
 the interface; it does not look at it.
+
+## Responsive Widths
+
+`browser_set_viewport` sets the CSS-pixel width the page lays out at. It sticks
+across navigation, new tabs and headless toggles until reset with `width: 0`.
+
+```
+browser_set_viewport { width: 360 }              // 360x844, touch emulated
+browser_set_viewport { width: 1440 }             // 1440x900
+browser_set_viewport { width: 390, scale: 3 }    // devicePixelRatio 3
+browser_set_viewport { width: 0 }                // back to the window size
+```
+
+Width at or below 768 also turns on touch emulation, so `pointer: coarse` and
+`hover: none` match and hover-only affordances disappear the way they do on a
+phone. Pass `mobile` to decide that explicitly.
+
+The layout viewport is pinned to the width you ask for and is not handed to the
+page's meta viewport tag. That matters: with mobile emulation on, Chrome widens
+the viewport to fit content that overflows, which hides the overflow instead of
+reporting it. Here a 400px block at 360px wide is a measured 56px overhang.
+
+Inside a flow, `viewport` is a step:
+
+```json
+{ "steps": [
+  { "action": "viewport", "width": 390 },
+  { "action": "audit" },
+  { "action": "viewport", "width": 1440 },
+  { "action": "audit" },
+  { "action": "viewport", "width": 0 }
+] }
+```
 
 ## Token Efficiency
 
@@ -284,6 +346,10 @@ Supported `action` values:
 - `closeTab`
 - `evaluate`
 - `screenshot`
+- `snapshot`
+- `styles`
+- `audit`
+- `viewport`
 
 ### Flow result shape
 
