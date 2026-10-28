@@ -4,7 +4,11 @@ An MCP (Model Context Protocol) server that provides browser automation tools po
 
 ## Features
 
-- **Headless Browser**: Automatically launches a stealth browser via CloakBrowser
+- **Stealth browser**: CloakBrowser with human-like mouse curves and typing
+- **Multiple sessions**: one isolated browser per test user, driven from one flow
+- **Evidence by default**: a screenshot of every step with the target outlined and the cursor drawn, an HTML report, Playwright traces, video and HAR on request
+- **Chrome DevTools**: console, network log with response bodies, Web Vitals, raw CDP, throttling, mocks, cookies and storage
+- **Attach to your own Chrome** over the DevTools port, logins included
 
 ## Quick Start
 
@@ -101,7 +105,133 @@ Add to your Claude Desktop config:
 | `browser_go_forward` | Navigate forward in browser history |
 | `browser_reload` | Reload the current page |
 | `browser_run_flow` | Run a complete multi-step browser workflow in one call |
-| `browser_close` | Close browser and cleanup |
+| `browser_close` | Close every session and browser |
+| `browser_session` | Open, list, switch and close isolated sessions; attach to a running Chrome |
+| `browser_evidence` | HTML report of a session's flows, Playwright trace start/stop |
+| `browser_devtools` | Console, network log, response bodies, performance, raw CDP |
+| `browser_emulate` | Network/CPU throttling, offline, geolocation, dark mode, timezone, UA |
+| `browser_mock` | Stub, delay or fail requests by glob or regex |
+| `browser_storage` | Cookies, localStorage/sessionStorage, save a login state |
+
+Every tool except `browser_session`, `browser_close` and `browser_set_headless`
+takes an optional `session`.
+
+## Sessions
+
+A session is an isolated browser: own cookies, storage and fingerprint. Naming
+one is enough to start it, so two users of a chat or a checkout are one flow:
+
+```json
+{ "steps": [
+  { "action": "navigate", "session": "alice", "url": "https://app.test/login" },
+  { "action": "fill", "session": "alice", "selector": "#email", "text": "alice@test.io" },
+  { "action": "click", "session": "alice", "selector": "button[type=submit]" },
+  { "action": "navigate", "session": "bob", "url": "https://app.test/login" },
+  { "action": "fill", "session": "bob", "selector": "#email", "text": "bob@test.io" },
+  { "action": "click", "session": "bob", "selector": "button[type=submit]" },
+  { "action": "fill", "session": "alice", "selector": "#message", "text": "hi bob" },
+  { "action": "press", "session": "alice", "key": "Enter" },
+  { "action": "assertText", "session": "bob", "selector": ".chat", "text": "hi bob", "timeout": 10000 }
+] }
+```
+
+Open one explicitly for anything beyond the defaults:
+
+```
+browser_session { action: "open", id: "admin", headless: false, video: true }
+browser_session { action: "open", id: "load", isolation: "context" }      // shared process, cheap
+browser_session { action: "open", id: "me", userDataDir: "/tmp/profile" }  // persistent profile
+browser_session { action: "open", id: "u1", storageState: "/tmp/u1.json" } // skip the login
+browser_session { action: "open", id: "vpn", proxy: "http://user:pass@host:8080", locale: "vi-VN", timezone: "Asia/Ho_Chi_Minh" }
+browser_session { action: "list" }
+browser_session { action: "use", id: "admin" }    // make it the default for later calls
+browser_session { action: "close", id: "admin" }  // returns the video/HAR paths
+```
+
+`isolation: "browser"` (default) launches a process per session; `"context"`
+shares one process per headless mode and only separates cookies and storage.
+
+### Attach to your own Chrome
+
+Start Chrome with a debugging port and a separate profile (Chrome 136+ refuses
+the port on the default profile), log in by hand, then attach:
+
+```bash
+"/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" \
+  --remote-debugging-port=9222 --user-data-dir="$HOME/.chrome-e2e"
+```
+
+```
+browser_session { action: "open", id: "real", cdpUrl: "http://127.0.0.1:9222" }
+```
+
+Closing that session only detaches; your Chrome and its tabs stay open.
+
+## Evidence
+
+Every `browser_run_flow` writes a screenshot after each state-changing step to
+`/tmp/mcp-browser-evidence/<session>-<time>/run-NN/`, named by step index and
+action, with the target element outlined and labelled, and the cursor, its
+trail and click ripples drawn on the page. The folder comes back as `evidence`,
+and a failing step adds `failureShot` and the page's recent `pageErrors`.
+Override the root with `BROWSER_EVIDENCE_DIR`.
+
+- `evidence: "failures"` on a flow shoots only failing steps, `"off"` none.
+- A failing single-action tool returns `failureShot` too.
+- `browser_evidence { action: "report" }` writes `report.html`: each flow as a
+  grid of step shots with pass/fail, timing and errors, plus console errors and
+  failed requests.
+- `browser_evidence { action: "traceStart" }` / `"traceStop"` records a
+  Playwright trace; open it with `npx playwright show-trace <file>`.
+- Video and HAR are recorded only when asked: `browser_session open` with
+  `video: true` or `har: true`; the files are returned on close.
+
+Pass `cursor: false` at open to keep the overlay off a site that inspects its DOM.
+
+## Mouse
+
+`type` types like a person (per-key timing, the occasional corrected typo),
+which is what you want on camera. `fill` sets the value at once and fires
+`input`/`change`, which is what you want in a test.
+
+```json
+{ "steps": [
+  { "action": "drag", "selector": ".card:first-child", "target": ".column.done" },
+  { "action": "draw", "selector": "canvas#signature", "points": [{"x":10,"y":40},{"x":60,"y":10},{"x":120,"y":50}] },
+  { "action": "mouseMove", "x": 400, "y": 300 },
+  { "action": "mouseClick", "x": 640, "y": 120 },
+  { "action": "dblclick", "selector": ".cell" },
+  { "action": "rightClick", "selector": ".file" }
+] }
+```
+
+`draw` points are relative to the selector's box, or the viewport without one.
+
+## DevTools
+
+```
+browser_devtools { action: "console", level: "error" }
+browser_devtools { action: "network", status: "error", type: "fetch" }
+  #14 POST 500 fetch 212ms https://app.test/api/order
+browser_devtools { action: "response", id: 14 }          // request + response headers and body
+browser_devtools { action: "performance" }               // TTFB, FCP, LCP, CLS, long tasks, heap, DOM size
+browser_devtools { action: "cdp", method: "Network.getCookies" }
+
+browser_emulate { network: "slow-3g", cpu: 4 }           // network: none resets, cpu: 1 resets
+browser_emulate { network: "offline" }
+browser_emulate { geolocation: { latitude: 21.03, longitude: 105.85 }, colorScheme: "dark" }
+
+browser_mock { action: "add", url: "**/api/cart", json: { items: [] } }
+browser_mock { action: "add", url: "/\\/api\\/pay/", status: 502, delay: 3000 }
+browser_mock { action: "add", url: "**/analytics/**", abort: true }
+browser_mock { action: "clear" }
+
+browser_storage { action: "save", filepath: "/tmp/alice.json" }  // reuse via storageState
+browser_storage { action: "cookies", domain: "app.test" }
+```
+
+Dialogs (`alert`, `confirm`, `prompt`) are accepted by default and logged to the
+console log; a `dialog` step with `accept: false` dismisses the next one.
 
 ## Seeing the Page Without a Screenshot
 
@@ -350,6 +480,13 @@ Supported `action` values:
 - `styles`
 - `audit`
 - `viewport`
+- `newTab`, `fill`, `dblclick`, `rightClick`, `upload` (`files`), `drag` (`target`)
+- `mouseMove`, `mouseClick`, `mouseDown`, `mouseUp`, `draw` (`points`)
+- `dialog` (`accept`, `text` for a prompt), `waitForDownload` (clicks `selector`, saves the file)
+- `assertNoErrors`: fails on console errors, uncaught exceptions, 5xx or failed requests since the flow began; `text` is a regex of lines to ignore
+
+Any `selector` also accepts a bare snapshot ref such as `e5`. A step's
+`session` runs it in that session.
 
 ### Flow result shape
 

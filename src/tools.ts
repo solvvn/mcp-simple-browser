@@ -1,14 +1,26 @@
 import { z } from "zod";
 import { writeFile } from "fs/promises";
+import { join } from "path";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
-import { closeBrowser, getPage, setPage, setHeadless, isHeadless, setViewport, getViewport } from "./browser.js";
-import type { Viewport } from "./browser.js";
+import {
+  activeSessionId, closeAll, closeSession, findSession, getPage, getSession, isHeadless, listSessions, openSession,
+  setHeadless, useSession,
+} from "./session.js";
+import { inspectWidths, runInspect, viewportFor } from "./inspect.js";
+import { automationStepSchema, runBrowserFlow, waitUntilSchema } from "./flow.js";
+import { screenshot, startTrace, stopTrace, writeReport } from "./evidence.js";
+import { addMock, emulate, listMocks, readConsole, readNetwork, readPerformance, readResponse, removeMock, sendCdp } from "./devtools.js";
+import { clamp, clampValue, collapse, compactHtml, ref, shortError } from "./util.js";
 
-type ToolHandler<T extends z.ZodRawShape> = (args: z.infer<z.ZodObject<T>>) => Promise<unknown>;
+const sessionField = z.string().optional().describe("Session id. Default: the active one");
+
+type ToolHandler<T extends z.ZodRawShape> = (args: z.infer<z.ZodObject<T>> & { session?: string }) => Promise<unknown>;
 
 interface ToolDefinition<S extends z.ZodRawShape> {
   name: string;
+  // false for tools that manage sessions themselves rather than act in one.
+  sessioned?: boolean;
   description: string;
   schema: S;
   handler: ToolHandler<S>;
@@ -20,47 +32,6 @@ function createTool<S extends z.ZodRawShape>(def: ToolDefinition<S>) {
 
 function success<T extends Record<string, unknown>>(extra: T) {
   return { success: true, ...extra };
-}
-
-function collapse(text: string): string {
-  return text.replace(/[ \t\f\v]+/g, " ").replace(/\s*\n\s*/g, "\n").trim();
-}
-
-function clamp(text: string, max: number): string {
-  return text.length <= max ? text : `${text.slice(0, max)}\n…[truncated, ${text.length - max} more chars]`;
-}
-
-// Drop parts of the markup that carry no information for the model: scripts,
-// styles, inline SVG paths, comments, and the whitespace between tags.
-function compactHtml(html: string): string {
-  return html
-    .replace(/<(script|style|noscript|template)\b[^>]*>[\s\S]*?<\/\1>/gi, "")
-    .replace(/<svg\b[^>]*>[\s\S]*?<\/svg>/gi, "<svg/>")
-    .replace(/<!--[\s\S]*?-->/g, "")
-    .replace(/\s*\n\s*/g, "\n")
-    .replace(/>\s+</g, "><")
-    .trim();
-}
-
-// Playwright appends a multi-line "Call log:" to most errors; the first line
-// is what identifies the failure, the rest is retry noise.
-function shortError(err: unknown): string {
-  if (err instanceof z.ZodError) {
-    return clamp(err.issues.map((issue) => `${issue.path.join(".")}: ${issue.message}`).join("; "), 300);
-  }
-  const message = err instanceof Error ? err.message : String(err);
-  return clamp(collapse(message.split(/\n?Call log:/)[0]), 300);
-}
-
-// Only these actions return something the model cannot already infer from the
-// step it sent; everything else is confirmed by `ok` alone.
-const VERBOSE_ACTIONS = new Set(["extractText", "extractHtml", "extractAttribute", "evaluate", "waitForResponse", "waitForTab", "switchTab", "snapshot", "styles", "audit", "viewport"]);
-
-function clampValue(value: unknown, max: number): unknown {
-  if (typeof value === "string") return clamp(value, max);
-  if (value === null || typeof value !== "object") return value;
-  const json = JSON.stringify(value);
-  return json.length <= max ? value : clamp(json, max);
 }
 
 const SearchEngines = {
@@ -87,787 +58,11 @@ const SearchEngines = {
   },
 } as const;
 
-// ---------------------------------------------------------------------------
-// Viewport: the width a responsive layout is measured at.
-// ---------------------------------------------------------------------------
-
-// At or below this width the page is being looked at as a touch device, which
-// is what makes `pointer: coarse` and `hover: none` match and hides or exposes
-// hover-only affordances.
-const TOUCH_MAX_WIDTH = 768;
-
-function viewportFor(width: number, height?: number, mobile?: boolean, scale = 1): Viewport {
-  const touch = mobile ?? width <= TOUCH_MAX_WIDTH;
-  return { width, height: height || (touch ? 844 : 900), scale, mobile: touch };
-}
-
-// ---------------------------------------------------------------------------
-// Page inspection: text descriptions of the UI that stand in for a screenshot
-// everywhere except aesthetic judgement.
-// ---------------------------------------------------------------------------
-
-const INTERACTIVE_SELECTOR =
-  "a[href],button,input,select,textarea,summary,[role=button],[role=link],[role=tab],[role=checkbox],[role=radio],[role=menuitem],[role=switch],[contenteditable=true]";
-
-const STYLE_KEYS = [
-  "display", "position", "width", "height", "margin", "padding", "color", "backgroundColor",
-  "fontSize", "fontWeight", "fontFamily", "lineHeight", "borderRadius", "border", "boxShadow",
-  "flexDirection", "justifyContent", "alignItems", "gap", "gridTemplateColumns", "opacity", "zIndex",
-];
-
-interface InspectArgs {
-  mode: "snapshot" | "styles" | "audit";
-  selector: string;
-  interactive: string;
-  keys: string[];
-  max: number;
-}
-
-function inspectPage({ mode, selector, interactive, keys, max }: InspectArgs): string {
-  const clean = (value: unknown) => String(value ?? "").replace(/\s+/g, " ").trim();
-  const box = (el: Element) => el.getBoundingClientRect();
-
-  const hidden = (el: Element) => {
-    const r = box(el);
-    const s = getComputedStyle(el);
-    if (s.visibility === "hidden" || s.display === "none" || Number(s.opacity) <= 0.05) return true;
-    // Screen-reader-only patterns: clipped to nothing, or parked off-canvas.
-    if (r.width <= 1 && r.height <= 1) return true;
-    return r.bottom < -500 || r.right < -500;
-  };
-
-  const named = (el: Element) => {
-    const cls = typeof el.className === "string" && el.className.trim()
-      ? `.${el.className.trim().split(/\s+/)[0]}`
-      : "";
-    return el.tagName.toLowerCase() + (el.id ? `#${el.id}` : cls);
-  };
-
-  const label = (el: Element) => {
-    const input = el as HTMLInputElement;
-    const candidates = [
-      el.getAttribute("aria-label"),
-      input.labels?.[0]?.textContent,
-      el.getAttribute("placeholder"),
-      /^(submit|button|reset)$/.test(input.type ?? "") ? input.value : "",
-      (el as HTMLElement).innerText,
-      el.getAttribute("title"),
-      el.getAttribute("alt"),
-      el.getAttribute("name"),
-      el.id ? `#${el.id}` : "",
-    ];
-    for (const candidate of candidates) {
-      const value = clean(candidate);
-      if (value) return value.slice(0, 80);
-    }
-    return "";
-  };
-
-  const scope = selector ? document.querySelector(selector) : document.body;
-  if (!scope) throw new Error(`${mode}: no element matches ${selector}`);
-
-  if (mode === "styles") {
-    const out: string[] = [];
-    for (const el of [...document.querySelectorAll(selector || "body")].slice(0, max)) {
-      const style = getComputedStyle(el) as unknown as Record<string, string>;
-      const r = box(el);
-      const pairs = keys
-        .map((key) => [key, style[key]] as const)
-        .filter(([, value]) => value && !["none", "normal", "auto", "0px", "static", "rgba(0, 0, 0, 0)"].includes(value));
-      out.push(
-        `${named(el)} [${Math.round(r.width)}x${Math.round(r.height)} @${Math.round(r.x)},${Math.round(r.y)}] `
-        + pairs.map(([key, value]) => `${key}:${value}`).join("; "),
-      );
-    }
-    return out.join("\n") || `(no element matches ${selector})`;
-  }
-
-  if (mode === "snapshot") {
-    const lines: string[] = [];
-    scope.querySelectorAll("[data-ref]").forEach((el) => el.removeAttribute("data-ref"));
-
-    for (const heading of scope.querySelectorAll("h1,h2,h3")) {
-      if (hidden(heading)) continue;
-      const text = clean((heading as HTMLElement).innerText);
-      if (text) lines.push(`${heading.tagName.toLowerCase()} ${text.slice(0, 100)}`);
-    }
-    if (lines.length) lines.push("--");
-
-    let count = 0;
-    for (const el of scope.querySelectorAll(interactive)) {
-      if (count >= max) break;
-      if (hidden(el)) continue;
-      const ref = `e${++count}`;
-      el.setAttribute("data-ref", ref);
-      const input = el as HTMLInputElement;
-      const tag = el.tagName.toLowerCase();
-      const kind = tag === "input" ? `input:${input.type || "text"}` : tag;
-      const state: string[] = [];
-      if (input.disabled) state.push("disabled");
-      if (input.checked) state.push("checked");
-      if (input.value && !/^(submit|button|reset|checkbox|radio)$/.test(input.type ?? "")) {
-        state.push(`="${clean(input.value).slice(0, 40)}"`);
-      }
-      lines.push(`${ref} ${kind} "${label(el)}"${state.length ? ` ${state.join(" ")}` : ""}`);
-    }
-    return lines.join("\n") || "(no visible interactive elements)";
-  }
-
-  const channels = (value: string) => (value.match(/[\d.]+/g) ?? []).map(Number);
-  const luminance = (c: number[]) => {
-    const f = (x: number) => (x /= 255) <= 0.03928 ? x / 12.92 : ((x + 0.055) / 1.055) ** 2.4;
-    return 0.2126 * f(c[0]) + 0.7152 * f(c[1]) + 0.0722 * f(c[2]);
-  };
-  const backdrop = (el: Element) => {
-    for (let node: Element | null = el; node && node !== document.documentElement; node = node.parentElement) {
-      const c = channels(getComputedStyle(node).backgroundColor);
-      if (c.length >= 3 && (c[3] === undefined || c[3] > 0.5)) return c;
-    }
-    return [255, 255, 255];
-  };
-  const contrast = (el: Element) => {
-    const [light, dark] = [luminance(channels(getComputedStyle(el).color)), luminance(backdrop(el))].sort((a, b) => b - a);
-    return (light + 0.05) / (dark + 0.05);
-  };
-
-  const issues: string[] = [];
-  const report = (message: string) => { if (issues.length < max) issues.push(message); };
-
-  if (document.documentElement.scrollWidth > window.innerWidth + 1) {
-    report(`overflow-x: page is ${document.documentElement.scrollWidth}px wide vs viewport ${window.innerWidth}px`);
-  }
-
-  for (const el of scope.querySelectorAll("*")) {
-    if (issues.length >= max) break;
-    if (hidden(el)) continue;
-    const style = getComputedStyle(el);
-    const r = box(el);
-
-    if ([...el.childNodes].some((node) => node.nodeType === 3 && node.textContent?.trim())) {
-      const ratio = contrast(el);
-      const size = parseFloat(style.fontSize) || 16;
-      const floor = size >= 24 || (size >= 18.66 && Number(style.fontWeight) >= 700) ? 3 : 4.5;
-      if (ratio < floor) report(`contrast ${named(el)}: ${ratio.toFixed(2)}:1 below ${floor} (${style.color})`);
-      if (el.scrollWidth > el.clientWidth + 1 && !/auto|scroll/.test(style.overflowX + style.overflow)) {
-        report(`clipped ${named(el)}: content ${el.scrollWidth}px in a ${el.clientWidth}px box`);
-      }
-    }
-    if (r.right > window.innerWidth + 1) {
-      report(`offscreen ${named(el)}: ${Math.round(r.right - window.innerWidth)}px past the right edge`);
-    }
-
-    const role = el.getAttribute("role") ?? "";
-    if (/^(a|button|input|select|textarea)$/.test(el.tagName.toLowerCase()) || /^(button|link|tab|checkbox)$/.test(role)) {
-      // Inline links inside running text are not tap targets; only standalone
-      // controls are measured against the 24px floor.
-      if (style.display !== "inline" && Math.min(r.width, r.height) < 24) {
-        report(`tap-target ${named(el)}: ${Math.round(r.width)}x${Math.round(r.height)}px under 24x24`);
-      }
-      const hit = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
-      if (hit && hit !== el && !el.contains(hit) && !hit.contains(el)) {
-        report(`covered ${named(el)}: obscured by ${named(hit)}`);
-      }
-    }
-    const img = el as HTMLImageElement;
-    if (el.tagName === "IMG" && img.complete && img.naturalWidth === 0) {
-      report(`broken-img ${el.getAttribute("src")}`);
-    }
-  }
-  return issues.length ? issues.join("\n") : "(no layout or contrast issues found)";
-}
-
-async function runInspect(
-  page: Awaited<ReturnType<typeof getPage>>,
-  mode: InspectArgs["mode"],
-  selector: string,
-  max: number,
-): Promise<string> {
-  return page.evaluate(inspectPage, {
-    mode,
-    selector,
-    interactive: INTERACTIVE_SELECTOR,
-    keys: STYLE_KEYS,
-    max,
-  });
-}
-
-// Reporting each width's findings in full is mostly repetition: an issue that
-// holds at every width is one line, and the interesting ones are those tagged
-// with the widths where they actually appear.
-async function inspectWidths(
-  page: Awaited<ReturnType<typeof getPage>>,
-  mode: InspectArgs["mode"],
-  selector: string,
-  max: number,
-  widths: number[],
-): Promise<string> {
-  const targets = [...new Set(widths)].sort((a, b) => a - b);
-  const previous = getViewport();
-  const seen = new Map<string, number[]>();
-
-  try {
-    for (const width of targets) {
-      await setViewport(viewportFor(width));
-      // Two frames: one for reflow, one for any ResizeObserver-driven relayout.
-      await page.evaluate(
-        () => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve(null)))),
-      );
-      const report = await runInspect(page, mode, selector, max);
-      for (const raw of report.split("\n")) {
-        // snapshot numbers its refs per run, so the same control is e3 at one
-        // width and e7 at another; drop the ref or nothing would ever group.
-        const line = mode === "snapshot" ? raw.replace(/^e\d+ /, "") : raw;
-        if (!line.trim()) continue;
-        const at = seen.get(line);
-        if (at) at.push(width);
-        else seen.set(line, [width]);
-      }
-    }
-  } finally {
-    await setViewport(previous);
-  }
-
-  const everywhere = (at: number[]) => at.length === targets.length;
-  return [...seen]
-    .sort(([, a], [, b]) => Number(everywhere(b)) - Number(everywhere(a)) || a[0] - b[0])
-    .map(([line, at]) => `[${everywhere(at) ? "all" : at.join(",")}] ${line}`)
-    .join("\n");
-}
-
-const waitUntilSchema = z
-  .enum(["load", "domcontentloaded", "networkidle", "commit"])
-  .default("networkidle");
-
-const automationStepSchema = z
-  .object({
-    action: z
-      .enum([
-        "navigate",
-        "click",
-        "type",
-        "clear",
-        "focus",
-        "selectOption",
-        "check",
-        "uncheck",
-        "press",
-        "wait",
-        "waitForSelector",
-        "waitForNavigation",
-        "waitForURL",
-        "waitForResponse",
-        "hover",
-        "scroll",
-        "scrollToTop",
-        "scrollToBottom",
-        "goBack",
-        "goForward",
-        "reload",
-        "extractText",
-        "extractHtml",
-        "extractAttribute",
-        "assertText",
-        "assertVisible",
-        "assertNotVisible",
-        "assertUrl",
-        "assertCount",
-        "assertAttribute",
-        "assertValue",
-        "assertChecked",
-        "switchTab",
-        "waitForTab",
-        "closeTab",
-        "evaluate",
-        "screenshot",
-        "snapshot",
-        "styles",
-        "audit",
-        "viewport",
-      ])
-      .describe("Action to run"),
-    name: z.string().optional().describe("Step label"),
-    selector: z.string().optional().describe("CSS selector"),
-    frame: z.string().optional().describe("iframe selector to scope this step into"),
-    url: z.string().optional().describe("URL for navigate, or pattern for waitForURL/waitForResponse"),
-    text: z.string().optional().describe("Text to type, or expected text for assert*"),
-    key: z.string().optional().describe("Key for press"),
-    milliseconds: z.number().optional().describe("Delay for wait"),
-    delay: z.number().default(50).describe("Keystroke delay, ms"),
-    timeout: z.number().default(5000).describe("Step timeout, ms"),
-    waitUntil: waitUntilSchema.describe("Navigation wait strategy"),
-    fullPage: z.boolean().default(false).describe("Full-page screenshot"),
-    filepath: z.string().optional().describe("Absolute path for screenshot"),
-    width: z.number().optional().describe("Viewport width in CSS px; 0 resets"),
-    height: z.number().optional().describe("Viewport height in CSS px"),
-    x: z.number().default(0).describe("Scroll px, horizontal"),
-    y: z.number().default(0).describe("Scroll px, vertical"),
-    script: z.string().optional().describe("JS to run in the page"),
-    variable: z.string().optional().describe("Save result as ${key} for later steps"),
-    attribute: z.string().optional().describe("Attribute name"),
-    count: z.number().optional().describe("Expected count for assertCount"),
-    checked: z.boolean().optional().describe("Expected state for assertChecked"),
-    tabIndex: z.number().optional().describe("Tab index for switchTab"),
-    match: z
-      .enum(["equals", "includes", "regex"])
-      .default("includes")
-      .describe("Comparison mode for assert*/waitForURL/waitForResponse"),
-    selectedValue: z.string().optional().describe("Value for selectOption"),
-    maxLength: z.number().default(2000).describe("Max chars returned by extract*/evaluate"),
-    continueOnError: z.boolean().default(false).describe("Keep going if this step fails"),
-  })
-  .superRefine((step, ctx) => {
-    // Assertions may legitimately expect an empty string ("this field is
-    // blank"), so only there does "" count as a real value.
-    const requireField = (field: keyof typeof step, message: string, allowEmpty = false) => {
-      const value = step[field];
-      if (value === undefined || (!allowEmpty && value === "")) {
-        ctx.addIssue({ code: z.ZodIssueCode.custom, message, path: [field] });
-      }
-    };
-
-    switch (step.action) {
-      case "navigate":
-        requireField("url", "url is required for navigate");
-        break;
-      case "click":
-      case "hover":
-      case "waitForSelector":
-      case "assertVisible":
-      case "assertNotVisible":
-      case "extractHtml":
-      case "clear":
-      case "focus":
-      case "check":
-      case "uncheck":
-        requireField("selector", `selector is required for ${step.action}`);
-        break;
-      case "type":
-        requireField("selector", "selector is required for type");
-        requireField("text", "text is required for type");
-        break;
-      case "selectOption":
-        requireField("selector", "selector is required for selectOption");
-        requireField("selectedValue", "selectedValue is required for selectOption");
-        break;
-      case "press":
-        requireField("key", "key is required for press");
-        break;
-      case "wait":
-        requireField("milliseconds", "milliseconds is required for wait");
-        break;
-      case "waitForNavigation":
-        break;
-      case "waitForURL":
-        requireField("url", "url is required for waitForURL");
-        break;
-      case "waitForResponse":
-        requireField("url", "url is required for waitForResponse");
-        break;
-      case "scroll":
-        requireField("y", "y is required for scroll");
-        break;
-      case "extractAttribute":
-        requireField("selector", "selector is required for extractAttribute");
-        requireField("attribute", "attribute is required for extractAttribute");
-        break;
-      case "assertText":
-        requireField("text", "text is required for assertText", true);
-        break;
-      case "assertUrl":
-        requireField("text", "text is required for assertUrl", true);
-        break;
-      case "assertCount":
-        requireField("selector", "selector is required for assertCount");
-        if (step.count === undefined) {
-          ctx.addIssue({ code: z.ZodIssueCode.custom, message: "count is required for assertCount", path: ["count"] });
-        }
-        break;
-      case "assertAttribute":
-        requireField("selector", "selector is required for assertAttribute");
-        requireField("attribute", "attribute is required for assertAttribute");
-        requireField("text", "text is required for assertAttribute", true);
-        break;
-      case "assertValue":
-        requireField("selector", "selector is required for assertValue");
-        requireField("text", "text is required for assertValue", true);
-        break;
-      case "assertChecked":
-        requireField("selector", "selector is required for assertChecked");
-        if (step.checked === undefined) {
-          ctx.addIssue({ code: z.ZodIssueCode.custom, message: "checked is required for assertChecked", path: ["checked"] });
-        }
-        break;
-      case "switchTab":
-        if (step.tabIndex === undefined) {
-          ctx.addIssue({ code: z.ZodIssueCode.custom, message: "tabIndex is required for switchTab", path: ["tabIndex"] });
-        }
-        break;
-      case "waitForTab":
-      case "closeTab":
-        break;
-      case "evaluate":
-        requireField("script", "script is required for evaluate");
-        break;
-      case "screenshot":
-        requireField("filepath", "filepath is required for screenshot");
-        break;
-      case "styles":
-        requireField("selector", "selector is required for styles");
-        break;
-      case "viewport":
-        requireField("width", "width is required for viewport (0 resets)");
-        break;
-      default:
-        break;
-    }
-  });
-
-function textMatches(actual: string, expected: string, match: "equals" | "includes" | "regex"): boolean {
-  if (match === "equals") return actual === expected;
-  if (match === "regex") return new RegExp(expected).test(actual);
-  return actual.includes(expected);
-}
-
-// Resolve a dot-path like "user.url" against the variables collected so far.
-function resolveVariable(path: string, variables: Record<string, unknown>): unknown {
-  return path.split(".").reduce<unknown>((acc, key) => {
-    if (acc === null || acc === undefined) return undefined;
-    return (acc as Record<string, unknown>)[key];
-  }, variables);
-}
-
-// Replace ${var} / ${var.path} tokens in a string with values from prior steps.
-function interpolate(input: string, variables: Record<string, unknown>): string {
-  return input.replace(/\$\{([^}]+)\}/g, (_, expr: string) => {
-    const value = resolveVariable(expr.trim(), variables);
-    if (value === undefined || value === null) return "";
-    return typeof value === "string" ? value : JSON.stringify(value);
-  });
-}
-
-const INTERPOLATED_FIELDS = ["selector", "frame", "url", "text", "key", "script", "attribute", "selectedValue", "filepath"] as const;
-
-function interpolateStep(
-  step: z.infer<typeof automationStepSchema>,
-  variables: Record<string, unknown>,
-): z.infer<typeof automationStepSchema> {
-  const out = { ...step } as Record<string, unknown>;
-  for (const field of INTERPOLATED_FIELDS) {
-    const current = out[field];
-    if (typeof current === "string") {
-      out[field] = interpolate(current, variables);
-    }
-  }
-  return out as z.infer<typeof automationStepSchema>;
-}
-
-function toLoadState(waitUntil: z.infer<typeof waitUntilSchema>): "load" | "domcontentloaded" | "networkidle" {
-  return waitUntil === "commit" ? "domcontentloaded" : waitUntil;
-}
-
-async function runBrowserFlow(
-  steps: Array<z.infer<typeof automationStepSchema>>,
-  stopOnError: boolean,
-) {
-  let page = await getPage();
-  const variables: Record<string, unknown> = {};
-  const results: Array<Record<string, unknown>> = [];
-
-  for (const [index, rawStep] of steps.entries()) {
-    const step = interpolateStep(rawStep, variables);
-
-    // Scope element actions to an iframe when `frame` is set, otherwise the page.
-    const scope = step.frame ? page.frameLocator(step.frame) : page;
-    const locator = step.selector ? scope.locator(step.selector) : null;
-
-    try {
-      let value: unknown = null;
-
-      switch (step.action) {
-        case "navigate":
-          await page.goto(step.url!, { waitUntil: step.waitUntil });
-          value = { url: page.url(), title: await page.title() };
-          break;
-        case "click":
-          await locator!.click({ timeout: step.timeout });
-          value = { clicked: step.selector };
-          break;
-        case "type":
-          await locator!.pressSequentially(step.text!, { delay: step.delay, timeout: step.timeout });
-          value = { typed: step.selector, length: step.text!.length };
-          break;
-        case "clear":
-          await locator!.clear({ timeout: step.timeout });
-          value = { cleared: step.selector };
-          break;
-        case "focus":
-          await locator!.focus({ timeout: step.timeout });
-          value = { focused: step.selector };
-          break;
-        case "selectOption": {
-          const selected = await locator!.selectOption(step.selectedValue!, { timeout: step.timeout });
-          value = { selector: step.selector, selected };
-          break;
-        }
-        case "check":
-          await locator!.check({ timeout: step.timeout });
-          value = { checked: step.selector };
-          break;
-        case "uncheck":
-          await locator!.uncheck({ timeout: step.timeout });
-          value = { unchecked: step.selector };
-          break;
-        case "press":
-          await page.keyboard.press(step.key!);
-          value = { key: step.key };
-          break;
-        case "wait":
-          await new Promise((resolve) => setTimeout(resolve, step.milliseconds));
-          value = { waited: step.milliseconds };
-          break;
-        case "waitForSelector":
-          await locator!.waitFor({ state: "visible", timeout: step.timeout });
-          value = { selector: step.selector, visible: true };
-          break;
-        case "waitForNavigation":
-          await page.waitForLoadState(toLoadState(step.waitUntil), { timeout: step.timeout });
-          value = { state: toLoadState(step.waitUntil) };
-          break;
-        case "waitForURL": {
-          const pattern = step.url!;
-          const mode = step.match;
-          await page.waitForURL(
-            (url) => textMatches(url.toString(), pattern, mode),
-            { timeout: step.timeout, waitUntil: toLoadState(step.waitUntil) },
-          );
-          value = { url: page.url(), matched: true };
-          break;
-        }
-        case "waitForResponse": {
-          const pattern = step.url!;
-          const mode = step.match;
-          const response = await page.waitForResponse(
-            (res) => textMatches(res.url(), pattern, mode),
-            { timeout: step.timeout },
-          );
-          value = { url: response.url(), status: response.status(), ok: response.ok() };
-          break;
-        }
-        case "hover":
-          await locator!.hover({ timeout: step.timeout });
-          value = { hovered: step.selector };
-          break;
-        case "scroll":
-          await page.evaluate(({ x, y }) => window.scrollBy(x, y), { x: step.x, y: step.y });
-          value = { x: step.x, y: step.y };
-          break;
-        case "scrollToTop":
-          await page.evaluate(() => window.scrollTo(0, 0));
-          value = { position: "top" };
-          break;
-        case "scrollToBottom":
-          await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
-          value = { position: "bottom" };
-          break;
-        case "goBack":
-          await page.goBack({ waitUntil: step.waitUntil, timeout: step.timeout });
-          break;
-        case "goForward":
-          await page.goForward({ waitUntil: step.waitUntil, timeout: step.timeout });
-          break;
-        case "reload":
-          await page.reload({ waitUntil: step.waitUntil, timeout: step.timeout });
-          break;
-        case "extractText": {
-          const target = locator ?? scope.locator("body");
-          value = collapse((await target.textContent({ timeout: step.timeout })) ?? "");
-          break;
-        }
-        case "extractHtml":
-          value = compactHtml(await locator!.innerHTML({ timeout: step.timeout }));
-          break;
-        case "extractAttribute":
-          value = await locator!.getAttribute(step.attribute!, { timeout: step.timeout });
-          break;
-        case "assertText": {
-          const target = locator ?? scope.locator("body");
-          const actual = (await target.textContent({ timeout: step.timeout })) ?? "";
-          if (!textMatches(actual, step.text!, step.match)) {
-            throw new Error(`assertText failed at ${step.selector ?? "body"}. expected ${step.match} "${step.text}" but got "${actual}"`);
-          }
-          value = { selector: step.selector ?? "body", matched: true, match: step.match };
-          break;
-        }
-        case "assertVisible":
-          await locator!.waitFor({ state: "visible", timeout: step.timeout });
-          value = { selector: step.selector, visible: true };
-          break;
-        case "assertNotVisible":
-          await locator!.waitFor({ state: "hidden", timeout: step.timeout });
-          value = { selector: step.selector, visible: false };
-          break;
-        case "assertUrl": {
-          const actual = page.url();
-          if (!textMatches(actual, step.text!, step.match)) {
-            throw new Error(`assertUrl failed. expected ${step.match} "${step.text}" but got "${actual}"`);
-          }
-          value = { url: actual, matched: true, match: step.match };
-          break;
-        }
-        case "assertCount": {
-          const actual = await locator!.count();
-          if (actual !== step.count) {
-            throw new Error(`assertCount failed at ${step.selector}. expected ${step.count} but got ${actual}`);
-          }
-          value = { selector: step.selector, count: actual };
-          break;
-        }
-        case "assertAttribute": {
-          const actual = await locator!.getAttribute(step.attribute!, { timeout: step.timeout });
-          if (actual === null || !textMatches(actual, step.text!, step.match)) {
-            throw new Error(`assertAttribute failed at ${step.selector}[${step.attribute}]. expected ${step.match} "${step.text}" but got ${actual === null ? "null" : `"${actual}"`}`);
-          }
-          value = { selector: step.selector, attribute: step.attribute, matched: true };
-          break;
-        }
-        case "assertValue": {
-          const actual = await locator!.inputValue({ timeout: step.timeout });
-          if (!textMatches(actual, step.text!, step.match)) {
-            throw new Error(`assertValue failed at ${step.selector}. expected ${step.match} "${step.text}" but got "${actual}"`);
-          }
-          value = { selector: step.selector, matched: true };
-          break;
-        }
-        case "assertChecked": {
-          const actual = await locator!.isChecked({ timeout: step.timeout });
-          if (actual !== step.checked) {
-            throw new Error(`assertChecked failed at ${step.selector}. expected ${step.checked} but got ${actual}`);
-          }
-          value = { selector: step.selector, checked: actual };
-          break;
-        }
-        case "switchTab": {
-          const pages = page.context().pages();
-          const target = pages[step.tabIndex!];
-          if (!target) {
-            throw new Error(`switchTab failed. no tab at index ${step.tabIndex}, only ${pages.length} open`);
-          }
-          page = target;
-          await page.bringToFront();
-          await setPage(page);
-          value = { tabIndex: step.tabIndex, url: page.url() };
-          break;
-        }
-        case "waitForTab": {
-          const target = await page.context().waitForEvent("page", { timeout: step.timeout });
-          await target.waitForLoadState(toLoadState(step.waitUntil), { timeout: step.timeout }).catch(() => {});
-          page = target;
-          await page.bringToFront();
-          await setPage(page);
-          value = { url: page.url(), title: await page.title() };
-          break;
-        }
-        case "closeTab": {
-          const context = page.context();
-          await page.close();
-          const next = context.pages()[0];
-          if (!next) {
-            throw new Error("closeTab failed. no remaining tab");
-          }
-          page = next;
-          await page.bringToFront();
-          await setPage(page);
-          value = { closed: true, url: page.url() };
-          break;
-        }
-        case "evaluate":
-          value = await page.evaluate(step.script!);
-          break;
-        case "snapshot":
-        case "styles":
-        case "audit":
-          value = await runInspect(page, step.action, step.selector ?? "", 60);
-          break;
-        case "viewport": {
-          await setViewport(step.width! > 0 ? viewportFor(step.width!, step.height) : null);
-          value = await page.evaluate(() => ({
-            width: window.innerWidth,
-            height: window.innerHeight,
-            touch: matchMedia("(pointer: coarse)").matches,
-          }));
-          break;
-        }
-        case "screenshot": {
-          const buffer = await page.screenshot({ fullPage: step.fullPage });
-          await writeFile(step.filepath!, buffer);
-          value = { filepath: step.filepath, size: buffer.length };
-          break;
-        }
-      }
-
-      if (step.variable) {
-        variables[step.variable] = clampValue(value, step.maxLength);
-      }
-
-      // Echoing back what the step itself said (clicked selector, scroll
-      // offsets, ...) is pure token cost: `ok` already confirms it ran, and a
-      // stored value is reported once through `variables`.
-      const keepValue = VERBOSE_ACTIONS.has(step.action) && !step.variable;
-      results.push({
-        i: index,
-        action: step.action,
-        ok: true,
-        ...(step.name ? { name: step.name } : {}),
-        ...(keepValue ? { value: clampValue(value, step.maxLength) } : {}),
-      });
-    } catch (err) {
-      const error = shortError(err);
-      results.push({
-        i: index,
-        action: step.action,
-        ok: false,
-        ...(step.name ? { name: step.name } : {}),
-        error,
-      });
-
-      if (step.continueOnError) {
-        continue;
-      }
-
-      if (stopOnError) {
-        return summarizeFlow(results, variables, page, index);
-      }
-    }
-  }
-
-  return summarizeFlow(results, variables, page);
-}
-
-// Steps that neither failed, carried a value, nor were named add nothing the
-// caller cannot read off its own request, so they are counted, not listed.
-async function summarizeFlow(
-  results: Array<Record<string, unknown>>,
-  variables: Record<string, unknown>,
-  page: Awaited<ReturnType<typeof getPage>>,
-  failedStep?: number,
-) {
-  const passed = results.filter((result) => result.ok === true).length;
-  const notable = results.filter((result) => result.ok !== true || "value" in result || "name" in result);
-  return {
-    success: failedStep === undefined && passed === results.length,
-    steps: `${passed}/${results.length}`,
-    ...(failedStep !== undefined ? { failedStep } : {}),
-    ...(notable.length ? { results: notable } : {}),
-    ...(Object.keys(variables).length ? { variables } : {}),
-    url: page.url(),
-    title: await page.title(),
-  };
-}
-
 const tools = [
   createTool({
     name: "browser_set_headless",
-    description: "Show or hide the browser window.",
+    description: "Show or hide the browser window for new sessions; restarts the active session if it uses the default.",
+    sessioned: false,
     schema: {
       headless: z.boolean().describe("true = no window, false = visible window"),
     },
@@ -885,9 +80,10 @@ const tools = [
       mobile: z.boolean().optional().describe("Touch emulation. Default: width <= 768"),
       scale: z.number().default(1).describe("devicePixelRatio"),
     },
-    handler: async ({ width, height, mobile, scale }) => {
-      const page = await getPage();
-      await setViewport(width > 0 ? viewportFor(width, height, mobile, scale) : null);
+    handler: async ({ width, height, mobile, scale, session }) => {
+      const current = await getSession(session);
+      const page = await current.activePage();
+      await current.setViewport(width > 0 ? viewportFor(width, height, mobile, scale) : null);
       // Report what the page actually sees, so a size the site overrides shows up.
       const actual = await page.evaluate(() => ({
         width: window.innerWidth,
@@ -895,7 +91,7 @@ const tools = [
         dpr: window.devicePixelRatio,
         touch: matchMedia("(pointer: coarse)").matches,
       }));
-      return success({ ...actual, override: getViewport() !== null });
+      return success({ ...actual, override: current.viewport !== null });
     },
   }),
   createTool({
@@ -905,8 +101,8 @@ const tools = [
       url: z.string().describe("Full URL including https://"),
       waitUntil: waitUntilSchema.describe("When navigation counts as done"),
     },
-    handler: async ({ url, waitUntil }) => {
-      const page = await getPage();
+    handler: async ({ url, waitUntil, session }) => {
+      const page = await getPage(session);
       await page.goto(url, { waitUntil });
       return success({ url: page.url(), title: await page.title() });
     },
@@ -915,10 +111,12 @@ const tools = [
     name: "browser_click",
     description: "Click an element. One-off only; for a multi-step interaction use browser_run_flow.",
     schema: {
-      selector: z.string().describe("CSS selector"),
+      selector: z.string().describe("CSS selector or snapshot ref like e5"),
     },
-    handler: async ({ selector }) => {
-      await (await getPage()).locator(selector).first().click();
+    handler: async ({ selector, session }) => {
+      const target = (await getPage(session)).locator(ref(selector)).first();
+      await target.waitFor({ state: "attached", timeout: 5000 });
+      await target.click();
       return success({});
     },
   }),
@@ -930,8 +128,10 @@ const tools = [
       text: z.string().describe("Text to type"),
       delay: z.number().default(50).describe("Keystroke delay, ms"),
     },
-    handler: async ({ selector, text, delay }) => {
-      await (await getPage()).locator(selector).first().pressSequentially(text, { delay });
+    handler: async ({ selector, text, delay, session }) => {
+      const target = (await getPage(session)).locator(ref(selector)).first();
+      await target.waitFor({ state: "attached", timeout: 5000 });
+      await target.pressSequentially(text, { delay });
       return success({});
     },
   }),
@@ -943,10 +143,10 @@ const tools = [
       maxLength: z.number().default(20000).describe("Max chars returned"),
       raw: z.boolean().default(false).describe("Skip stripping and return the HTML untouched"),
     },
-    handler: async ({ selector, maxLength, raw }) => {
-      const page = await getPage();
+    handler: async ({ selector, maxLength, raw, session }) => {
+      const page = await getPage(session);
       const html = selector
-        ? await page.locator(selector).first().innerHTML()
+        ? await page.locator(ref(selector)).first().innerHTML()
         : await page.content();
       return { html: clamp(raw ? html : compactHtml(html), maxLength) };
     },
@@ -958,15 +158,15 @@ const tools = [
       selector: z.string().optional().describe("Element to read. Defaults to the whole page"),
       maxLength: z.number().default(20000).describe("Max chars returned"),
     },
-    handler: async ({ selector, maxLength }) => {
-      const page = await getPage();
+    handler: async ({ selector, maxLength, session }) => {
+      const page = await getPage(session);
       const text = await page.locator(selector || "body").first().textContent();
       return { text: clamp(collapse(text ?? ""), maxLength) };
     },
   }),
   createTool({
     name: "browser_inspect",
-    description: "Read the UI as text instead of a screenshot. snapshot: visible interactive elements, each stamped with data-ref so you can click it as [data-ref=\"e5\"]. styles: computed style and geometry. audit: contrast, overflow, clipped text, covered or undersized controls, broken images. Screenshot only for genuinely visual judgement.",
+    description: "Read the UI as text instead of a screenshot. snapshot: visible interactive elements, each stamped with data-ref so any selector field accepts it as e5 or [data-ref=\"e5\"]. styles: computed style and geometry. audit: contrast, overflow, clipped text, covered or undersized controls, broken images. Screenshot only for genuinely visual judgement.",
     schema: {
       mode: z.enum(["snapshot", "styles", "audit"]).default("snapshot").describe("What to read"),
       selector: z.string().optional().describe("Root for snapshot/audit, target elements for styles"),
@@ -977,11 +177,13 @@ const tools = [
         .optional()
         .describe("Re-run at each CSS-px width and tag every line with where it occurs, e.g. [360,768,1440]. Restores the viewport after"),
     },
-    handler: async ({ mode, selector, max, maxLength, widths }) => {
-      const page = await getPage();
+    handler: async ({ mode, selector, max, maxLength, widths, session }) => {
+      const current = await getSession(session);
+      const page = await current.activePage();
+      const root = selector ? ref(selector) : "";
       const report = widths?.length
-        ? await inspectWidths(page, mode, selector ?? "", max, widths)
-        : await runInspect(page, mode, selector ?? "", max);
+        ? await inspectWidths(current, page, mode, root, max, widths)
+        : await runInspect(page, mode, root, max);
       return { [mode]: clamp(report, maxLength) };
     },
   }),
@@ -992,8 +194,8 @@ const tools = [
       script: z.string().describe("JS to run; its return value comes back"),
       maxLength: z.number().default(20000).describe("Max chars returned"),
     },
-    handler: async ({ script, maxLength }) => ({
-      result: clampValue(await (await getPage()).evaluate(script), maxLength),
+    handler: async ({ script, maxLength, session }) => ({
+      result: clampValue(await (await getPage(session)).evaluate(script), maxLength),
     }),
   }),
   createTool({
@@ -1004,8 +206,8 @@ const tools = [
       engine: z.enum(["google", "duckduckgo", "bing"]).default("duckduckgo").describe("Search engine"),
       limit: z.number().default(10).describe("Max results"),
     },
-    handler: async ({ query, engine, limit }) => {
-      const page = await getPage();
+    handler: async ({ query, engine, limit, session }) => {
+      const page = await getPage(session);
       const config = SearchEngines[engine];
       await page.goto(config.url(encodeURIComponent(query)), { waitUntil: "networkidle" });
 
@@ -1056,10 +258,11 @@ const tools = [
   }),
   createTool({
     name: "browser_close",
-    description: "Close the browser and free resources.",
+    description: "Close every session and browser and free resources. To close just one, use browser_session.",
+    sessioned: false,
     schema: {},
     handler: async () => {
-      await closeBrowser();
+      await closeAll();
       return success({});
     },
   }),
@@ -1067,13 +270,17 @@ const tools = [
     name: "browser_save_screenshot",
     description: "Screenshot the page to a file. Use browser_inspect to read the UI as text; screenshot only when the judgement needs eyes.",
     schema: {
-      filepath: z.string().describe("Absolute path for the .png"),
+      filepath: z.string().optional().describe("Absolute path for the .png/.jpg. Default: the session's evidence dir"),
       fullPage: z.boolean().default(false).describe("Capture the whole scrollable page"),
+      selector: z.string().optional().describe("Outline this element in the shot"),
     },
-    handler: async ({ filepath, fullPage }) => {
-      const buffer = await (await getPage()).screenshot({ fullPage });
-      await writeFile(filepath, buffer);
-      return success({ filepath, size: buffer.length });
+    handler: async ({ filepath, fullPage, selector, session }) => {
+      const current = await getSession(session);
+      const page = await current.activePage();
+      const box = selector ? await page.locator(ref(selector)).first().boundingBox({ timeout: 2000 }) : null;
+      const path = filepath || join(current.evidenceDir, `shot-${Date.now()}.png`);
+      await screenshot(page, path, box, selector, fullPage);
+      return success({ filepath: path });
     },
   }),
   createTool({
@@ -1084,8 +291,8 @@ const tools = [
       landscape: z.boolean().default(false).describe("Landscape orientation"),
       printBackground: z.boolean().default(true).describe("Include background colors and images"),
     },
-    handler: async ({ filepath, landscape, printBackground }) => {
-      const pdf = await (await getPage()).pdf({
+    handler: async ({ filepath, landscape, printBackground, session }) => {
+      const pdf = await (await getPage(session)).pdf({
         landscape,
         printBackground,
         format: "A4",
@@ -1098,8 +305,8 @@ const tools = [
     name: "browser_go_back",
     description: "Go back in history.",
     schema: {},
-    handler: async () => {
-      await (await getPage()).goBack();
+    handler: async ({ session }) => {
+      await (await getPage(session)).goBack();
       return success({});
     },
   }),
@@ -1107,8 +314,8 @@ const tools = [
     name: "browser_go_forward",
     description: "Go forward in history.",
     schema: {},
-    handler: async () => {
-      await (await getPage()).goForward();
+    handler: async ({ session }) => {
+      await (await getPage(session)).goForward();
       return success({});
     },
   }),
@@ -1116,19 +323,196 @@ const tools = [
     name: "browser_reload",
     description: "Reload the current page.",
     schema: {},
-    handler: async () => {
-      await (await getPage()).reload();
+    handler: async ({ session }) => {
+      await (await getPage(session)).reload();
       return success({});
     },
   }),
   createTool({
     name: "browser_run_flow",
-    description: "PREFERRED for ANY browser task of 2+ steps — use it instead of chaining single-action tools. Runs ordered actions in one call on the same page: navigation, forms, scraping, assertions, snapshot/styles/audit, screenshots. It is also the only place for wait, press, hover, scroll, viewport and tab control. Open an unfamiliar page with a `snapshot` step, then act on the refs it stamps via [data-ref=\"e5\"]. Every string field supports ${var} from a prior step's `variable`; `frame` scopes into an iframe. Results are compacted: passing steps report only a count, so use `variable` or an extract* step for anything you need back.",
+    description: "PREFERRED for ANY browser task of 2+ steps — use it instead of chaining single-action tools. Runs ordered actions in one call: navigation, forms, uploads, dialogs, downloads, mouse drag/draw, assertions, snapshot/styles/audit. It is also the only place for wait, press, hover, scroll, viewport and tab control. Open an unfamiliar page with a `snapshot` step, then act on its refs (selector \"e5\"). A step's `session` runs it in another isolated browser, so one flow can drive several users. Every string field supports ${var} from a prior step's `variable`; `frame` scopes into an iframe. A screenshot of each state-changing step lands in the returned `evidence` dir. Passing steps report only a count, so use `variable` or an extract* step for anything you need back.",
     schema: {
       steps: z.array(automationStepSchema).min(1).describe("Ordered actions to run"),
       stopOnError: z.boolean().default(true).describe("Stop at the first failing step"),
+      evidence: z
+        .enum(["steps", "failures", "off"])
+        .default("steps")
+        .describe("steps: a screenshot after every state-changing step, target outlined; failures: only on failure"),
     },
-    handler: async ({ steps, stopOnError }) => runBrowserFlow(steps, stopOnError),
+    handler: async ({ steps, stopOnError, evidence, session }) => runBrowserFlow(steps, stopOnError, session, evidence),
+  }),
+  createTool({
+    name: "browser_session",
+    description: "Manage isolated browser sessions, e.g. one per test user. open: start one (isolation browser = own process and fingerprint, context = cheap shared process, or attach to a running Chrome via cdpUrl). Any tool's `session` also auto-opens with defaults. list, use (make active), close (returns video/HAR paths).",
+    sessioned: false,
+    schema: {
+      action: z.enum(["open", "list", "use", "close"]).describe("What to do"),
+      id: z.string().optional().describe("Session id. Default: the active one"),
+      isolation: z.enum(["browser", "context"]).default("browser").describe("browser: own process; context: shared process, separate cookies"),
+      headless: z.boolean().optional().describe("Default: browser_set_headless setting"),
+      cdpUrl: z.string().optional().describe("Attach to a running Chrome, e.g. http://127.0.0.1:9222. Closing only detaches"),
+      userDataDir: z.string().optional().describe("Persistent profile dir; logins survive restarts"),
+      storageState: z.string().optional().describe("Load cookies/localStorage from a file saved by browser_storage save"),
+      proxy: z.string().optional().describe("http://user:pass@host:port"),
+      userAgent: z.string().optional(),
+      locale: z.string().optional().describe("e.g. vi-VN"),
+      timezone: z.string().optional().describe("e.g. Asia/Ho_Chi_Minh"),
+      colorScheme: z.enum(["light", "dark", "no-preference"]).optional(),
+      humanize: z.boolean().default(true).describe("Human-like mouse curves and typing"),
+      cursor: z.boolean().default(true).describe("Draw the cursor, trail and clicks on the page"),
+      video: z.boolean().default(false).describe("Record video until close"),
+      har: z.boolean().default(false).describe("Record a HAR file until close"),
+    },
+    handler: async ({ action, id, ...options }) => {
+      if (action === "list") return { active: activeSessionId(), sessions: listSessions() };
+      if (action === "use") {
+        useSession(id ?? "default");
+        return success({ active: activeSessionId() });
+      }
+      if (action === "close") {
+        const artifacts = await closeSession(id);
+        return artifacts ? success(artifacts) : { success: false, error: `no open session "${id ?? activeSessionId()}"` };
+      }
+      const opened = await openSession(id ?? activeSessionId(), options);
+      return success({ id: opened.id, isolation: opened.isolation, headless: opened.headless, evidenceDir: opened.evidenceDir });
+    },
+  }),
+  createTool({
+    name: "browser_evidence",
+    description: "Test evidence for a session. report: write report.html with every flow's step screenshots, pass/fail, console errors and failed requests. traceStart/traceStop: Playwright trace.zip (open with `npx playwright show-trace`). dir: where evidence is saved.",
+    schema: {
+      action: z.enum(["report", "traceStart", "traceStop", "dir"]).describe("What to do"),
+    },
+    handler: async ({ action, session }) => {
+      const current = await getSession(session);
+      if (action === "report") return success({ report: await writeReport(current) });
+      if (action === "traceStart") {
+        await startTrace(current);
+        return success({ tracing: true });
+      }
+      if (action === "traceStop") return success({ trace: await stopTrace(current) });
+      return { dir: current.evidenceDir };
+    },
+  }),
+  createTool({
+    name: "browser_devtools",
+    description: "Chrome DevTools data for a session. console: messages and uncaught errors. network: request log (filter by url/status/type); response: headers and body of request #id from that log. performance: Web Vitals (TTFB, FCP, LCP, CLS), long tasks, heap, DOM size. cdp: send any Chrome DevTools Protocol command to the current tab.",
+    schema: {
+      action: z.enum(["console", "network", "response", "performance", "cdp"]).describe("What to read"),
+      level: z.enum(["all", "error", "warning"]).default("all").describe("console: minimum level"),
+      url: z.string().optional().describe("network: substring filter"),
+      status: z.enum(["all", "failed", "error"]).default("all").describe("network: error = 4xx/5xx or failed"),
+      type: z.string().optional().describe("network: resource type, e.g. xhr, fetch, document, script"),
+      id: z.number().optional().describe("response: request id from the network log"),
+      method: z.string().optional().describe("cdp: e.g. DOM.getDocument, Network.getCookies"),
+      params: z.record(z.string(), z.unknown()).optional().describe("cdp: command params"),
+      limit: z.number().default(50).describe("Max rows"),
+      clear: z.boolean().default(false).describe("Clear the log after reading"),
+      maxLength: z.number().default(8000).describe("Max chars returned"),
+    },
+    handler: async ({ action, level, url, status, type, id, method, params, limit, clear, maxLength, session }) => {
+      const current = await getSession(session);
+      switch (action) {
+        case "console":
+          return { console: clamp(readConsole(current, level, limit, clear), maxLength) };
+        case "network":
+          return { network: clamp(readNetwork(current, { url, status, type, limit, clear }), maxLength) };
+        case "response":
+          if (id === undefined) throw new Error("id is required for response");
+          return readResponse(current, id, maxLength);
+        case "performance":
+          return readPerformance(current);
+        case "cdp":
+          if (!method) throw new Error("method is required for cdp");
+          return { result: clampValue(await sendCdp(current, method, params), maxLength) };
+      }
+    },
+  }),
+  createTool({
+    name: "browser_emulate",
+    description: "Emulate conditions in the current tab: network (offline, slow-3g, fast-3g, 4g, none), CPU slowdown, geolocation, dark mode, reduced motion, timezone, user agent, extra headers. Viewport is browser_set_viewport.",
+    schema: {
+      network: z.enum(["none", "offline", "slow-3g", "fast-3g", "4g"]).optional().describe("none resets"),
+      cpu: z.number().optional().describe("Slowdown factor, 1 resets, 4 = mid-range phone"),
+      geolocation: z
+        .object({ latitude: z.number(), longitude: z.number(), accuracy: z.number().optional() })
+        .nullable()
+        .optional()
+        .describe("null clears"),
+      colorScheme: z.enum(["light", "dark", "no-preference"]).optional(),
+      reducedMotion: z.enum(["reduce", "no-preference"]).optional(),
+      timezone: z.string().optional().describe("IANA id; empty string resets"),
+      userAgent: z.string().optional(),
+      headers: z.record(z.string(), z.string()).optional().describe("Extra HTTP headers for every request"),
+    },
+    handler: async ({ session, ...args }) => success({ applied: await emulate(await getSession(session), args) }),
+  }),
+  createTool({
+    name: "browser_mock",
+    description: "Intercept requests in every tab of a session. add: answer a URL with a canned status/body/JSON, delay it, or abort it. url is a glob like **/api/users* or a /regex/. remove (by url) or clear all; list.",
+    schema: {
+      action: z.enum(["add", "remove", "clear", "list"]).describe("What to do"),
+      url: z.string().optional().describe("Glob or /regex/"),
+      status: z.number().optional().describe("Default 200"),
+      json: z.unknown().optional().describe("JSON body; sets content-type"),
+      body: z.string().optional().describe("Raw body"),
+      contentType: z.string().optional(),
+      headers: z.record(z.string(), z.string()).optional(),
+      abort: z.boolean().default(false).describe("Fail the request instead"),
+      delay: z.number().optional().describe("Delay before answering, ms"),
+      times: z.number().optional().describe("Only intercept this many times"),
+    },
+    handler: async ({ action, session, ...rule }) => {
+      const current = await getSession(session);
+      if (action === "list") return { mocks: listMocks(current) };
+      if (action === "clear") return success({ mocks: await removeMock(current) });
+      if (!rule.url) throw new Error(`url is required for ${action}`);
+      if (action === "remove") return success({ mocks: await removeMock(current, rule.url) });
+      return success({ mocks: await addMock(current, { ...rule, url: rule.url }) });
+    },
+  }),
+  createTool({
+    name: "browser_storage",
+    description: "Cookies and web storage. cookies: list (filter by domain); setCookies; clearCookies; local/session: read localStorage/sessionStorage of the current origin; setLocal: write keys; save: write cookies+storage to a file that browser_session open storageState can load to skip a login.",
+    schema: {
+      action: z.enum(["cookies", "setCookies", "clearCookies", "local", "session", "setLocal", "save"]).describe("What to do"),
+      domain: z.string().optional().describe("cookies: substring filter"),
+      cookies: z
+        .array(z.object({ name: z.string(), value: z.string(), domain: z.string().optional(), path: z.string().optional(), url: z.string().optional(), httpOnly: z.boolean().optional(), secure: z.boolean().optional() }))
+        .optional()
+        .describe("setCookies: each needs url, or domain+path"),
+      values: z.record(z.string(), z.string()).optional().describe("setLocal: key/value pairs"),
+      filepath: z.string().optional().describe("save: target .json. Default: the evidence dir"),
+    },
+    handler: async ({ action, domain, cookies, values, filepath, session }) => {
+      const current = await getSession(session);
+      const page = await current.activePage();
+      switch (action) {
+        case "cookies": {
+          const all = await current.context.cookies();
+          return { cookies: all.filter((c) => !domain || c.domain.includes(domain)).map(({ name, value, domain, path, expires, httpOnly, secure }) => ({ name, value: clamp(value, 200), domain, path, expires, httpOnly, secure })) };
+        }
+        case "setCookies":
+          if (!cookies?.length) throw new Error("cookies is required for setCookies");
+          await current.context.addCookies(cookies);
+          return success({ added: cookies.length });
+        case "clearCookies":
+          await current.context.clearCookies(domain ? { domain: new RegExp(domain.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")) } : undefined);
+          return success({});
+        case "local":
+        case "session":
+          return { origin: new URL(page.url()).origin, [action]: await page.evaluate((kind) => ({ ...(kind === "local" ? localStorage : sessionStorage) }), action) };
+        case "setLocal":
+          if (!values) throw new Error("values is required for setLocal");
+          await page.evaluate((entries) => entries.forEach(([k, v]) => localStorage.setItem(k, v)), Object.entries(values));
+          return success({ set: Object.keys(values).length });
+        case "save": {
+          const path = filepath || join(current.evidenceDir, "storage-state.json");
+          await current.context.storageState({ path });
+          return success({ filepath: path });
+        }
+      }
+    },
   }),
 ];
 
@@ -1137,16 +521,28 @@ function toResult(value: unknown, isError = false): CallToolResult {
   return { content: [{ type: "text", text }], ...(isError && { isError }) };
 }
 
+// A single-action tool that fails leaves the page in the state that explains
+// the failure; capture it before the next call changes it.
+async function failureShot(name: string, args: { session?: string }) {
+  const current = findSession(args.session);
+  if (!current || name === "browser_run_flow" || current.page.isClosed()) return {};
+  const path = join(current.evidenceDir, `${name}-FAILED-${Date.now()}.jpg`);
+  return screenshot(current.page, path).then((shot) => ({ failureShot: shot }), () => ({}));
+}
+
 export function registerTools(server: McpServer): void {
   for (const tool of tools) {
     server.registerTool(
       tool.name,
-      { description: tool.description, inputSchema: tool.schema },
+      {
+        description: tool.description,
+        inputSchema: tool.sessioned === false ? tool.schema : { ...tool.schema, session: sessionField },
+      },
       async (args) => {
         try {
           return toResult(await tool.handler(args as never));
         } catch (err) {
-          return toResult({ error: shortError(err) }, true);
+          return toResult({ error: shortError(err), ...(await failureShot(tool.name, args)) }, true);
         }
       },
     );
