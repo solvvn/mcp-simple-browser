@@ -240,10 +240,10 @@ chownr@^3.0.0:
   resolved "https://registry.npmjs.org/chownr/-/chownr-3.0.0.tgz"
   integrity sha512-+IxzY9BZOQd/XuYPRmrvEVjF/nqj5kgT4kEq7VofrDoM1MxoRjEWkrCC3EtLi59TVawxTAn+orJwFQcrqEN1+g==
 
-cloakbrowser@^0.3.30:
-  version "0.3.30"
-  resolved "https://registry.npmjs.org/cloakbrowser/-/cloakbrowser-0.3.30.tgz"
-  integrity sha512-e7kDZzOmqRn9VOFskTDLU6rFqj+TYj68942XFqs2m+CC5G8yHwkHhitjMQJaI/c5Zvl7Aez/kf1JjO/b3VqYaA==
+cloakbrowser@^0.6.4:
+  version "0.6.4"
+  resolved "https://registry.yarnpkg.com/cloakbrowser/-/cloakbrowser-0.6.4.tgz#4666f0bfc95571a3546e2b76b5f883eef3add9cb"
+  integrity sha512-0dYorA9UdbDvfYgRuNfvri/46GFcS9Aipqzniv55ijolweFC6gaoZe/g/wROYZSJuv8oovX54hMr++K6W3aYjw==
   dependencies:
     tar "^7.0.0"
 

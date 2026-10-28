@@ -23,7 +23,7 @@
   "license": "MIT",
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",
-    "cloakbrowser": "^0.3.30",
+    "cloakbrowser": "^0.6.4",
     "dotenv": "^17.4.2",
     "playwright-core": "^1.53.2",
     "zod": "^4.4.3"
