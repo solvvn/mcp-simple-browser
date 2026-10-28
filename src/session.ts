@@ -4,6 +4,7 @@ import { launch, launchPersistentContext, humanizeBrowser } from "cloakbrowser";
 import { chromium } from "playwright-core";
 import type { Browser, BrowserContext, BrowserContextOptions, CDPSession, Dialog, Page, Request, Response } from "playwright-core";
 import { overlayScript, vitalsScript } from "./overlay.js";
+import { closeBrowser, launchInBackground, launchesInBackground, parseProxy } from "./background.js";
 
 export type { Page } from "playwright-core";
 
@@ -119,24 +120,36 @@ export class Session {
       ...(o.timezone ? { timezone: o.timezone } : {}),
     };
 
+    const background = !this.headless && launchesInBackground;
+    // A browser launched outside Playwright takes the proxy per context, which
+    // is also the only place Playwright can answer the proxy's auth challenge.
+    if (background && o.proxy && !o.userDataDir) contextOptions.proxy = parseProxy(o.proxy);
+    const launchBrowser = (opts: typeof launchOptions) =>
+      background ? launchInBackground({ ...opts, proxy: undefined }) : launch(opts);
+
     if (this.isolation === "cdp") {
       // Attaching to a Chrome the user already runs: reuse its default context
       // so existing logins and tabs are in reach. close() only disconnects.
       this.browser = await chromium.connectOverCDP(o.cdpUrl!);
       if (humanize) await humanizeBrowser(this.browser, { humanize: true });
       this.context = this.browser.contexts()[0] ?? (await this.browser.newContext(contextOptions));
+    } else if (o.userDataDir && background) {
+      // The profile lives in the default context, which takes no context
+      // options; recordings and storage state need a non-persistent session.
+      this.browser = await launchInBackground(launchOptions, o.userDataDir);
+      this.context = this.browser.contexts()[0];
     } else if (o.userDataDir) {
       this.context = await launchPersistentContext({ ...launchOptions, userDataDir: o.userDataDir, contextOptions });
     } else if (this.isolation === "context") {
       let shared = sharedBrowsers.get(this.headless);
       if (!shared) {
-        shared = launch(launchOptions);
+        shared = launchBrowser(launchOptions);
         sharedBrowsers.set(this.headless, shared);
         shared.catch(() => sharedBrowsers.delete(this.headless));
       }
       this.context = await (await shared).newContext(contextOptions);
     } else {
-      this.browser = await launch(launchOptions);
+      this.browser = await launchBrowser(launchOptions);
       this.context = await this.browser.newContext(contextOptions);
     }
 
@@ -278,7 +291,7 @@ export class Session {
       await this.browser?.close().catch(() => {});
     } else {
       await this.context.close().catch(() => {});
-      await this.browser?.close().catch(() => {});
+      if (this.browser) await closeBrowser(this.browser);
     }
     const paths = await Promise.all(videos.map((video) => video.path().catch(() => "")));
     return {
@@ -357,7 +370,8 @@ export async function closeAll(): Promise<void> {
   await Promise.all([...sessions.keys()].map((id) => closeSession(id)));
   for (const [key, shared] of sharedBrowsers) {
     sharedBrowsers.delete(key);
-    await (await shared.catch(() => null))?.close().catch(() => {});
+    const browser = await shared.catch(() => null);
+    if (browser) await closeBrowser(browser);
   }
   activeId = "default";
 }

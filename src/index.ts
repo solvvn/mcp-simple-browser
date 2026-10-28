@@ -26,6 +26,9 @@ async function main() {
   registerTools(server);
   console.error("SimpleBrowser MCP Server running on stdio");
   await server.connect(new StdioServerTransport());
+  // The client closing stdin is the end of the session; an open CDP socket
+  // would otherwise keep this process, and its browsers, alive.
+  process.stdin.once("close", () => process.exit(0));
 }
 
 main().catch((err) => {

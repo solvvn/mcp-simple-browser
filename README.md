@@ -151,6 +151,14 @@ browser_session { action: "close", id: "admin" }  // returns the video/HAR paths
 `isolation: "browser"` (default) launches a process per session; `"context"`
 shares one process per headless mode and only separates cookies and storage.
 
+### Watching without losing focus
+
+Input goes to the page over the DevTools protocol, never through the OS, so
+your own mouse and keyboard are never touched. On macOS a headed browser is
+also launched in the background: its windows appear, but opening them, popups
+and tab switches never take focus from the app you are working in. Set
+`BROWSER_ALLOW_FOCUS=1` to launch it in the foreground instead.
+
 ### Attach to your own Chrome
 
 Start Chrome with a debugging port and a separate profile (Chrome 136+ refuses
