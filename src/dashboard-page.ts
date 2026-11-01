@@ -30,7 +30,7 @@ input,select{font:inherit;font-size:13px;padding:4px 8px;border:1px solid var(--
 .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(360px,1fr));gap:14px}
 .card{background:var(--card);border:1px solid var(--line);border-radius:10px;overflow:hidden;display:flex;flex-direction:column}
 .card.active{border-color:var(--accent);box-shadow:0 0 0 1px var(--accent)}
-.shot{display:block;width:100%;aspect-ratio:16/10;object-fit:cover;object-position:top;background:var(--chip);border-bottom:1px solid var(--line);cursor:zoom-in}
+.shot{display:block;width:100%;aspect-ratio:16/9;object-fit:cover;object-position:top;background:var(--chip);border-bottom:1px solid var(--line);cursor:zoom-in}
 .body{padding:10px 12px;display:grid;gap:8px}
 .title{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
 .title b{font-size:15px}
@@ -58,7 +58,7 @@ input,select{font:inherit;font-size:13px;padding:4px 8px;border:1px solid var(--
 .files{display:grid;grid-template-columns:repeat(auto-fill,minmax(210px,1fr));gap:10px}
 .file{background:var(--card);border:1px solid var(--line);border-radius:8px;overflow:hidden;display:flex;flex-direction:column}
 .file.fail{border-top:3px solid var(--fail)}
-.file .thumb{width:100%;aspect-ratio:16/10;object-fit:cover;object-position:top;background:var(--chip);display:flex;align-items:center;justify-content:center;font-size:28px;color:var(--muted);cursor:pointer;border:0}
+.file .thumb{width:100%;aspect-ratio:16/9;object-fit:cover;object-position:top;background:var(--chip);display:flex;align-items:center;justify-content:center;font-size:28px;color:var(--muted);cursor:pointer;border:0}
 .file .meta{padding:6px 8px;display:grid;gap:4px;font-size:12px}
 .file .meta .p{word-break:break-all}
 .file .acts{display:flex;gap:4px;flex-wrap:wrap}
