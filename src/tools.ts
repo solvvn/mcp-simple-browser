@@ -9,7 +9,8 @@ import {
 } from "./session.js";
 import { inspectWidths, runInspect, viewportFor } from "./inspect.js";
 import { automationStepSchema, runBrowserFlow, waitUntilSchema } from "./flow.js";
-import { screenshot, startTrace, stopTrace, writeReport } from "./evidence.js";
+import { screenshot, startTrace, stopTrace, trackFile, writeReport } from "./evidence.js";
+import { dashboardUrl } from "./dashboard.js";
 import { addMock, emulate, listMocks, readConsole, readNetwork, readPerformance, readResponse, removeMock, sendCdp } from "./devtools.js";
 import { clamp, clampValue, collapse, compactHtml, ref, shortError } from "./util.js";
 
@@ -298,6 +299,7 @@ const tools = [
         format: "A4",
       });
       await writeFile(filepath, pdf);
+      trackFile(filepath);
       return success({ filepath, size: pdf.length });
     },
   }),
@@ -364,7 +366,10 @@ const tools = [
       har: z.boolean().default(false).describe("Record a HAR file until close"),
     },
     handler: async ({ action, id, ...options }) => {
-      if (action === "list") return { active: activeSessionId(), sessions: listSessions() };
+      if (action === "list") {
+        const ui = dashboardUrl();
+        return { active: activeSessionId(), sessions: listSessions(), ...(ui ? { ui } : {}) };
+      }
       if (action === "use") {
         useSession(id ?? "default");
         return success({ active: activeSessionId() });
@@ -509,6 +514,7 @@ const tools = [
         case "save": {
           const path = filepath || join(current.evidenceDir, "storage-state.json");
           await current.context.storageState({ path });
+          trackFile(path);
           return success({ filepath: path });
         }
       }
