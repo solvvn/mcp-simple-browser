@@ -175,6 +175,34 @@ browser_session { action: "open", id: "real", cdpUrl: "http://127.0.0.1:9222" }
 
 Closing that session only detaches; your Chrome and its tabs stay open.
 
+## Dashboard
+
+While the server runs it also serves a small web page at
+**http://127.0.0.1:9330/** (the URL is printed on stderr and returned by
+`browser_session { action: "list" }` as `ui`).
+
+- **Session**: every open session with a live screenshot, its tabs (click to
+  switch), request and console-error counts, and recording state. Open a new
+  session, navigate, go back, reload, make one the default, write its report,
+  or close it.
+- **Assets**: the evidence folders under `BROWSER_EVIDENCE_DIR`, newest first,
+  with step screenshots grouped per run, failed steps marked, filters by type
+  and name, and a viewer for images, videos, PDFs and `report.html`. Download,
+  copy the path, delete a file or a closed session's folder, or prune all
+  closed folders older than N days. Files the tools saved elsewhere
+  (`filepath` outside the evidence dir, PDFs, downloads, storage state) are
+  listed under their own entry.
+
+| Variable | Effect |
+|---|---|
+| `BROWSER_UI=0` | Do not start the dashboard |
+| `BROWSER_UI_PORT=9400` | First port to try (default 9330); a busy port moves to the next, up to 10 |
+
+It listens on 127.0.0.1 only and has no login. Requests with a non-loopback
+`Host` are refused, and anything that changes state needs an `X-MCP-UI`
+header a cross-site page cannot send. It cannot delete or serve files outside
+the evidence dir, apart from the files the tools saved in this process.
+
 ## Evidence
 
 Every `browser_run_flow` writes a screenshot after each state-changing step to

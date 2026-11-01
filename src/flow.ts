@@ -4,7 +4,7 @@ import { getSession } from "./session.js";
 import type { Locator } from "playwright-core";
 import type { Page, Session } from "./session.js";
 import { runInspect, viewportFor } from "./inspect.js";
-import { screenshot, shotPath, startRun } from "./evidence.js";
+import { screenshot, shotPath, startRun, trackFile } from "./evidence.js";
 import type { Box, EvidenceMode, FlowRun, StepRecord } from "./evidence.js";
 import { clamp, clampValue, collapse, compactHtml, ref, shortError } from "./util.js";
 
@@ -321,6 +321,7 @@ async function runStep(step: Step, session: Session, run: FlowRun, index: number
       const [download] = await Promise.all([page.waitForEvent("download", t), locator?.click(t)]);
       const path = step.filepath || join(run.dir, download.suggestedFilename());
       await download.saveAs(path);
+      trackFile(path);
       return { filepath: path, url: download.url() };
     }
     case "scroll":

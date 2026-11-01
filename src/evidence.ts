@@ -1,5 +1,6 @@
 import { mkdir, writeFile } from "fs/promises";
-import { basename, join, relative } from "path";
+import { basename, join, relative, resolve, sep } from "path";
+import { EVIDENCE_ROOT } from "./session.js";
 import type { Page, Session } from "./session.js";
 
 export type EvidenceMode = "steps" | "failures" | "off";
@@ -33,6 +34,29 @@ export interface FlowRun {
 
 const runs = new WeakMap<Session, FlowRun[]>();
 
+// Files the tools wrote outside the evidence root (a screenshot to ~/Desktop, a
+// PDF, a download). The dashboard lists and serves exactly these and nothing
+// else outside the root.
+const tracked = new Set<string>();
+const TRACK_LIMIT = 500;
+
+export function trackFile(path: string): void {
+  const full = resolve(path);
+  const root = resolve(EVIDENCE_ROOT);
+  if (full === root || full.startsWith(root + sep)) return;
+  tracked.delete(full);
+  tracked.add(full);
+  if (tracked.size > TRACK_LIMIT) tracked.delete(tracked.values().next().value!);
+}
+
+export function trackedFiles(): string[] {
+  return [...tracked].reverse();
+}
+
+export function forgetFile(path: string): void {
+  tracked.delete(path);
+}
+
 export async function startRun(session: Session): Promise<FlowRun> {
   const list = runs.get(session) ?? [];
   runs.set(session, list);
@@ -60,6 +84,7 @@ export async function screenshot(page: Page, filepath: string, box?: Box | null,
   } finally {
     if (box) await page.evaluate(() => window.__mcpOverlay?.clear()).catch(() => {});
   }
+  trackFile(filepath);
   return filepath;
 }
 
