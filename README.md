@@ -634,6 +634,21 @@ yarn typecheck
 yarn build
 ```
 
+## Releasing
+
+`.github/workflows/publish.yml` publishes to npm with provenance:
+
+- **From GitHub**: Actions → *Publish to npm* → *Run workflow* on `main`, pick
+  `patch`, `minor` or `major`. It bumps `package.json`, pushes the `x.y.z`
+  commit and `vX.Y.Z` tag, then publishes.
+- **From a terminal**: `npm version minor && git push --follow-tags`; the tag
+  triggers the publish.
+
+Authentication is npm trusted publishing: on npmjs.com, package *Settings* →
+*Trusted Publisher* → GitHub Actions, organization `solvvn`, repository
+`mcp-simple-browser`, workflow `publish.yml`. No token is needed. An
+`NPM_TOKEN` repository secret (an npm automation token) works as a fallback.
+
 ## License
 
 MIT

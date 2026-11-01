@@ -1,7 +1,7 @@
 // The dashboard's single page. Plain DOM, no build step, no external requests.
 // Written without backticks or template placeholders so it can live in this
 // template literal untouched.
-export const dashboardHtml = `<!doctype html>
+export const dashboardHtml: string = `<!doctype html>
 <html lang="vi">
 <head>
 <meta charset="utf-8">
