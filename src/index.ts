@@ -4,9 +4,13 @@ dotenv.config();
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import { readFileSync } from "fs";
 import { registerTools } from "./tools.js";
+import { startDashboard } from "./dashboard.js";
 
-const INSTRUCTIONS = `Stateful browser sessions, kept alive until closed. Every tool takes an optional \`session\` id: each id is an isolated browser (own cookies, storage and fingerprint), opened on first use, so two users of the same site are just session "alice" and session "bob". browser_session open sets isolation, a persistent profile, saved login state, proxy, video/HAR, or attaches to a running Chrome via cdpUrl.
+const { version } = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")) as { version: string };
+
+const INSTRUCTIONS = `Stateful browser sessions, kept alive until closed. Every tool takes an optional \`session\` id: each id is an isolated browser (own cookies, storage and fingerprint), opened on first use, so two users of the same site are just session "alice" and session "bob". Ids are shared by every MCP client on the machine, so give each separate task its own id (e.g. named after the task) and reuse an id only to continue that task's browser; calls without one use this client's private default. browser_session open sets isolation, a persistent profile, saved login state, proxy, video/HAR, or attaches to a running Chrome via cdpUrl.
 
 Evidence is automatic: browser_run_flow screenshots every state-changing step with the target outlined and the cursor drawn, and returns the folder; a failing tool returns failureShot. browser_evidence report turns a session's flows into report.html; traceStart/traceStop records a Playwright trace. Video only when asked, via browser_session open video:true.
 
@@ -20,12 +24,17 @@ To see a page, use browser_inspect, not a screenshot: mode snapshot lists the in
 
 async function main() {
   const server = new McpServer(
-    { name: "simple-browser", version: "1.0.0" },
+    { name: "simple-browser", version },
     { instructions: INSTRUCTIONS },
   );
   registerTools(server);
   console.error("SimpleBrowser MCP Server running on stdio");
   await server.connect(new StdioServerTransport());
+  // The dashboard is a convenience: failing to bind must never stop the tools.
+  startDashboard().then(
+    (url) => url && console.error(`Dashboard: ${url}`),
+    (err) => console.error(`Dashboard disabled: ${err instanceof Error ? err.message : err}`),
+  );
   // The client closing stdin is the end of the session; an open CDP socket
   // would otherwise keep this process, and its browsers, alive.
   process.stdin.once("close", () => process.exit(0));

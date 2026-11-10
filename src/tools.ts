@@ -4,14 +4,16 @@ import { join } from "path";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import {
-  activeSessionId, closeAll, closeSession, findSession, getPage, getSession, isHeadless, listSessions, openSession,
+  DEFAULT_SESSION, activeSessionId, closeAll, closeSession, exclusive, findSession, getPage, getSession, isHeadless, listSessions, openSession,
   setHeadless, useSession,
 } from "./session.js";
 import { inspectWidths, runInspect, viewportFor } from "./inspect.js";
 import { automationStepSchema, runBrowserFlow, waitUntilSchema } from "./flow.js";
-import { screenshot, startTrace, stopTrace, writeReport } from "./evidence.js";
+import { screenshot, startTrace, stopTrace, trackFile, writeReport } from "./evidence.js";
+import { dashboardUrl } from "./dashboard.js";
 import { addMock, emulate, listMocks, readConsole, readNetwork, readPerformance, readResponse, removeMock, sendCdp } from "./devtools.js";
-import { clamp, clampValue, collapse, compactHtml, ref, shortError } from "./util.js";
+import { clamp, clampValue, collapse, compactHtml, evaluateScript, ref, settleNavigation, shortError } from "./util.js";
+import type { Page } from "./session.js";
 
 const sessionField = z.string().optional().describe("Session id. Default: the active one");
 
@@ -32,6 +34,23 @@ function createTool<S extends z.ZodRawShape>(def: ToolDefinition<S>) {
 
 function success<T extends Record<string, unknown>>(extra: T) {
   return { success: true, ...extra };
+}
+
+type WaitUntil = z.infer<typeof waitUntilSchema>;
+
+// goBack/goForward resolve to null when there is no entry to move to; say so
+// instead of reporting a move that did not happen.
+async function history(page: Page, move: "back" | "forward" | "reload", waitUntil: WaitUntil) {
+  const from = page.url();
+  const response = move === "back"
+    ? await page.goBack({ waitUntil })
+    : move === "forward"
+      ? await page.goForward({ waitUntil })
+      : await page.reload({ waitUntil });
+  if (!response && move !== "reload" && page.url() === from) {
+    return { success: false, error: `No history entry to go ${move} to`, url: from };
+  }
+  return success({ url: page.url(), title: await page.title() });
 }
 
 const SearchEngines = {
@@ -114,10 +133,11 @@ const tools = [
       selector: z.string().describe("CSS selector or snapshot ref like e5"),
     },
     handler: async ({ selector, session }) => {
-      const target = (await getPage(session)).locator(ref(selector)).first();
+      const page = await getPage(session);
+      const target = page.locator(ref(selector)).first();
       await target.waitFor({ state: "attached", timeout: 5000 });
-      await target.click();
-      return success({});
+      await settleNavigation(page, () => target.click());
+      return success({ url: page.url() });
     },
   }),
   createTool({
@@ -160,7 +180,7 @@ const tools = [
     },
     handler: async ({ selector, maxLength, session }) => {
       const page = await getPage(session);
-      const text = await page.locator(selector || "body").first().textContent();
+      const text = await page.locator(selector ? ref(selector) : "body").first().textContent();
       return { text: clamp(collapse(text ?? ""), maxLength) };
     },
   }),
@@ -191,11 +211,13 @@ const tools = [
     name: "browser_evaluate",
     description: "Run JavaScript in the page. Return only the data you need, not whole DOM dumps.",
     schema: {
-      script: z.string().describe("JS to run; its return value comes back"),
+      script: z
+        .string()
+        .describe("JS expression or statements; the last value comes back. Top-level await works; with await and several statements, end with return"),
       maxLength: z.number().default(20000).describe("Max chars returned"),
     },
     handler: async ({ script, maxLength, session }) => ({
-      result: clampValue(await (await getPage(session)).evaluate(script), maxLength),
+      result: clampValue(await evaluateScript(await getPage(session), script), maxLength),
     }),
   }),
   createTool({
@@ -273,13 +295,17 @@ const tools = [
       filepath: z.string().optional().describe("Absolute path for the .png/.jpg. Default: the session's evidence dir"),
       fullPage: z.boolean().default(false).describe("Capture the whole scrollable page"),
       selector: z.string().optional().describe("Outline this element in the shot"),
+      label: z.string().optional().describe("Caption on the outline, e.g. what the element proves. Default: the selector"),
+      crop: z.boolean().default(false).describe("Crop to the outlined element plus some context"),
     },
-    handler: async ({ filepath, fullPage, selector, session }) => {
+    handler: async ({ filepath, fullPage, selector, label, crop, session }) => {
       const current = await getSession(session);
       const page = await current.activePage();
-      const box = selector ? await page.locator(ref(selector)).first().boundingBox({ timeout: 2000 }) : null;
+      const element = selector ? page.locator(ref(selector)).first() : null;
+      if (element) await element.scrollIntoViewIfNeeded({ timeout: 2000 });
+      const box = element ? await element.boundingBox({ timeout: 2000 }) : null;
       const path = filepath || join(current.evidenceDir, `shot-${Date.now()}.png`);
-      await screenshot(page, path, box, selector, fullPage);
+      await screenshot(page, path, { box, label: label ?? selector, fullPage, crop });
       return success({ filepath: path });
     },
   }),
@@ -298,35 +324,27 @@ const tools = [
         format: "A4",
       });
       await writeFile(filepath, pdf);
+      trackFile(filepath);
       return success({ filepath, size: pdf.length });
     },
   }),
   createTool({
     name: "browser_go_back",
     description: "Go back in history.",
-    schema: {},
-    handler: async ({ session }) => {
-      await (await getPage(session)).goBack();
-      return success({});
-    },
+    schema: { waitUntil: waitUntilSchema.describe("When navigation counts as done") },
+    handler: async ({ waitUntil, session }) => history(await getPage(session), "back", waitUntil),
   }),
   createTool({
     name: "browser_go_forward",
     description: "Go forward in history.",
-    schema: {},
-    handler: async ({ session }) => {
-      await (await getPage(session)).goForward();
-      return success({});
-    },
+    schema: { waitUntil: waitUntilSchema.describe("When navigation counts as done") },
+    handler: async ({ waitUntil, session }) => history(await getPage(session), "forward", waitUntil),
   }),
   createTool({
     name: "browser_reload",
     description: "Reload the current page.",
-    schema: {},
-    handler: async ({ session }) => {
-      await (await getPage(session)).reload();
-      return success({});
-    },
+    schema: { waitUntil: waitUntilSchema.describe("When navigation counts as done") },
+    handler: async ({ waitUntil, session }) => history(await getPage(session), "reload", waitUntil),
   }),
   createTool({
     name: "browser_run_flow",
@@ -343,7 +361,7 @@ const tools = [
   }),
   createTool({
     name: "browser_session",
-    description: "Manage isolated browser sessions, e.g. one per test user. open: start one (isolation browser = own process and fingerprint, context = cheap shared process, or attach to a running Chrome via cdpUrl). Any tool's `session` also auto-opens with defaults. list, use (make active), close (returns video/HAR paths).",
+    description: "Manage isolated browser sessions, e.g. one per test user. Sessions are shared by id across every MCP client on this machine: naming a session another client has open joins it (one client drives it at a time), and it stays up until the last client leaves or one closes it. Without an id a call uses this client's own default, never another client's, so separate tasks stay apart unless they name the same session. open: start one (isolation browser = own process and fingerprint, context = cheap shared process, or attach to a running Chrome via cdpUrl); isolation context, video, har and a proxy with credentials keep a session private to this client. Any tool's `session` also auto-opens with defaults. list (here=false: open in another client), use (make active), close (ends it for every client; returns video/HAR paths).",
     sessioned: false,
     schema: {
       action: z.enum(["open", "list", "use", "close"]).describe("What to do"),
@@ -364,17 +382,28 @@ const tools = [
       har: z.boolean().default(false).describe("Record a HAR file until close"),
     },
     handler: async ({ action, id, ...options }) => {
-      if (action === "list") return { active: activeSessionId(), sessions: listSessions() };
+      if (action === "list") {
+        const ui = dashboardUrl();
+        return { active: activeSessionId(), sessions: listSessions(), ...(ui ? { ui } : {}) };
+      }
       if (action === "use") {
-        useSession(id ?? "default");
+        useSession(id ?? DEFAULT_SESSION);
         return success({ active: activeSessionId() });
       }
+      const key = id ?? activeSessionId();
       if (action === "close") {
-        const artifacts = await closeSession(id);
-        return artifacts ? success(artifacts) : { success: false, error: `no open session "${id ?? activeSessionId()}"` };
+        const artifacts = await exclusive(key, () => closeSession(key));
+        return artifacts ? success(artifacts) : { success: false, error: `no open session "${key}"` };
       }
-      const opened = await openSession(id ?? activeSessionId(), options);
-      return success({ id: opened.id, isolation: opened.isolation, headless: opened.headless, evidenceDir: opened.evidenceDir });
+      const opened = await exclusive(key, () => openSession(key, options));
+      return success({
+        id: opened.id,
+        isolation: opened.isolation,
+        headless: opened.headless,
+        shared: opened.shareable,
+        ...(opened.attached ? { attached: "already open in another instance; joined it with its original options" } : {}),
+        evidenceDir: opened.evidenceDir,
+      });
     },
   }),
   createTool({
@@ -414,7 +443,7 @@ const tools = [
       const current = await getSession(session);
       switch (action) {
         case "console":
-          return { console: clamp(readConsole(current, level, limit, clear), maxLength) };
+          return { console: clamp(await readConsole(current, level, limit, clear), maxLength) };
         case "network":
           return { network: clamp(readNetwork(current, { url, status, type, limit, clear }), maxLength) };
         case "response":
@@ -509,6 +538,7 @@ const tools = [
         case "save": {
           const path = filepath || join(current.evidenceDir, "storage-state.json");
           await current.context.storageState({ path });
+          trackFile(path);
           return success({ filepath: path });
         }
       }
@@ -540,7 +570,8 @@ export function registerTools(server: McpServer): void {
       },
       async (args) => {
         try {
-          return toResult(await tool.handler(args as never));
+          const run = () => tool.handler(args as never);
+          return toResult(await (tool.sessioned === false ? run() : exclusive((args as { session?: string }).session, run)));
         } catch (err) {
           return toResult({ error: shortError(err), ...(await failureShot(tool.name, args)) }, true);
         }

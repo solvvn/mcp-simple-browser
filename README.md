@@ -118,8 +118,15 @@ takes an optional `session`.
 
 ## Sessions
 
-A session is an isolated browser: own cookies, storage and fingerprint. Naming
-one is enough to start it, so two users of a chat or a checkout are one flow:
+A session is an isolated browser: own cookies, storage and fingerprint. Session
+ids are shared by every MCP client on the machine, so separate tasks use
+separate ids and only tasks that name the same id share a browser. A call
+without `session` goes to the client's own default (`task-<random>`), which no
+other client lands in; set `BROWSER_SESSION` to pin its name, e.g. to resume a
+task's browser after a restart.
+
+Naming a session is enough to start it, so two users of a chat or a checkout
+are one flow:
 
 ```json
 { "steps": [
@@ -145,6 +152,7 @@ browser_session { action: "open", id: "u1", storageState: "/tmp/u1.json" } // sk
 browser_session { action: "open", id: "vpn", proxy: "http://user:pass@host:8080", locale: "vi-VN", timezone: "Asia/Ho_Chi_Minh" }
 browser_session { action: "list" }
 browser_session { action: "use", id: "admin" }    // make it the default for later calls
+browser_session { action: "use" }                 // back to this client's own default
 browser_session { action: "close", id: "admin" }  // returns the video/HAR paths
 ```
 

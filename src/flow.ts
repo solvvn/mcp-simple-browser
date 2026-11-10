@@ -1,12 +1,13 @@
 import { z } from "zod";
-import { join } from "path";
-import { getSession } from "./session.js";
+import { basename, join } from "path";
+import { exclusive, getSession } from "./session.js";
 import type { Locator } from "playwright-core";
 import type { Page, Session } from "./session.js";
 import { runInspect, viewportFor } from "./inspect.js";
-import { screenshot, shotPath, startRun } from "./evidence.js";
+import { recordStep, screenshot, shotPath, startRun, trackFile } from "./evidence.js";
 import type { Box, EvidenceMode, FlowRun, StepRecord } from "./evidence.js";
-import { clamp, clampValue, collapse, compactHtml, ref, shortError } from "./util.js";
+import { clamp, clampValue, collapse, compactHtml, evaluateScript, ref, settleNavigation, shortError } from "./util.js";
+import { finishRun, setRunCurrent } from "./store.js";
 
 export const waitUntilSchema = z
   .enum(["load", "domcontentloaded", "networkidle", "commit"])
@@ -40,11 +41,11 @@ export const automationStepSchema = z
   .object({
     action: z.enum(ACTIONS).describe("Action to run"),
     session: z.string().optional().describe("Run this step in another session (auto-opened), e.g. a second user"),
-    name: z.string().optional().describe("Step label"),
+    name: z.string().optional().describe("Short description of what the step does, shown on its evidence screenshot, e.g. \"Đăng nhập bằng tài khoản admin\". Default: generated from the action and target"),
     selector: z.string().optional().describe("CSS/Playwright selector, or a snapshot ref like e5"),
     target: z.string().optional().describe("Drop target selector for drag"),
     frame: z.string().optional().describe("iframe selector to scope this step into"),
-    url: z.string().optional().describe("URL for navigate/newTab, or pattern for waitForURL/waitForResponse"),
+    url: z.string().optional().describe("URL for navigate/newTab, or pattern for waitForURL/waitForResponse/assertUrl"),
     text: z.string().optional().describe("Text to type/fill, expected text for assert*, prompt text for dialog, ignore regex for assertNoErrors"),
     key: z.string().optional().describe("Key for press, e.g. Enter, Control+A"),
     files: z.array(z.string()).optional().describe("Absolute file paths for upload"),
@@ -55,6 +56,7 @@ export const automationStepSchema = z
     timeout: z.number().default(5000).describe("Step timeout, ms"),
     waitUntil: waitUntilSchema.describe("Navigation wait strategy"),
     fullPage: z.boolean().default(false).describe("Full-page screenshot"),
+    crop: z.boolean().default(false).describe("screenshot with selector: crop to the outlined element plus some context"),
     filepath: z.string().optional().describe("Save path for screenshot/waitForDownload. Default: the run's evidence dir"),
     width: z.number().optional().describe("Viewport width in CSS px; 0 resets"),
     height: z.number().optional().describe("Viewport height in CSS px"),
@@ -135,8 +137,10 @@ export const automationStepSchema = z
         need("attribute");
         break;
       case "assertText":
-      case "assertUrl":
         need("text", true);
+        break;
+      case "assertUrl":
+        if (step.url === undefined) need("text", true);
         break;
       case "assertCount":
         need("selector");
@@ -226,7 +230,15 @@ function errorsSince(session: Session, since: number, ignore?: string) {
   return [...consoleErrors, ...requests].filter((line) => !skip?.test(line));
 }
 
-async function runStep(step: Step, session: Session, run: FlowRun, index: number, flowStart: number): Promise<unknown> {
+// What existed when the previous step began. A wait* step usually follows the
+// click that caused the event, which may already have fired during that click
+// or its evidence shot; the wait accepts it rather than timing out.
+interface Prior {
+  t: number;
+  pages: Set<Page>;
+}
+
+async function runStep(step: Step, session: Session, run: FlowRun, index: number, flowStart: number, prior: Prior): Promise<unknown> {
   const page = await session.activePage();
   // Scope element actions to an iframe when `frame` is set, otherwise the page.
   const scope = step.frame ? page.frameLocator(step.frame) : page;
@@ -248,9 +260,9 @@ async function runStep(step: Step, session: Session, run: FlowRun, index: number
       return { tabIndex: session.context.pages().indexOf(next), url: next.url() };
     }
     case "click":
-      return void (await locator!.click(t));
+      return void (await settleNavigation(page, () => locator!.click(t)));
     case "dblclick":
-      return void (await locator!.dblclick(t));
+      return void (await settleNavigation(page, () => locator!.dblclick(t)));
     case "rightClick":
       return void (await locator!.click({ ...t, button: "right" }));
     case "type":
@@ -268,7 +280,7 @@ async function runStep(step: Step, session: Session, run: FlowRun, index: number
     case "uncheck":
       return void (await locator!.uncheck(t));
     case "press":
-      return void (await (locator ? locator.press(step.key!, t) : page.keyboard.press(step.key!)));
+      return void (await settleNavigation(page, () => (locator ? locator.press(step.key!, t) : page.keyboard.press(step.key!))));
     case "upload":
       return void (await locator!.setInputFiles(step.files!, t));
     case "hover":
@@ -279,7 +291,7 @@ async function runStep(step: Step, session: Session, run: FlowRun, index: number
       return void (await page.mouse.move(step.x, step.y, { steps: 20 }));
     case "mouseClick":
       await page.mouse.move(step.x, step.y, { steps: 20 });
-      return void (await page.mouse.click(step.x, step.y));
+      return void (await settleNavigation(page, () => page.mouse.click(step.x, step.y)));
     case "mouseDown":
       return void (await page.mouse.down());
     case "mouseUp":
@@ -308,11 +320,14 @@ async function runStep(step: Step, session: Session, run: FlowRun, index: number
     }
     case "waitForResponse": {
       const pattern = step.url!;
+      const seen = session.networkLog.find((e) => e.t >= prior.t && e.status !== undefined && textMatches(e.url, pattern, step.match));
+      if (seen) return { url: seen.url, status: seen.status, ok: seen.status! < 400 };
       const response = await page.waitForResponse((res) => textMatches(res.url(), pattern, step.match), t);
       return { url: response.url(), status: response.status(), ok: response.ok() };
     }
     case "waitForTab": {
-      const next = await session.context.waitForEvent("page", t);
+      const opened = session.context.pages().find((p) => !prior.pages.has(p) && p !== page);
+      const next = opened ?? (await session.context.waitForEvent("page", t));
       await next.waitForLoadState(toLoadState(step.waitUntil), t).catch(() => {});
       await session.usePage(next);
       return { url: next.url(), title: await next.title() };
@@ -321,6 +336,7 @@ async function runStep(step: Step, session: Session, run: FlowRun, index: number
       const [download] = await Promise.all([page.waitForEvent("download", t), locator?.click(t)]);
       const path = step.filepath || join(run.dir, download.suggestedFilename());
       await download.saveAs(path);
+      trackFile(path);
       return { filepath: path, url: download.url() };
     }
     case "scroll":
@@ -342,7 +358,7 @@ async function runStep(step: Step, session: Session, run: FlowRun, index: number
     case "extractAttribute":
       return locator!.first().getAttribute(step.attribute!, t);
     case "evaluate":
-      return page.evaluate(step.script!);
+      return evaluateScript(page, step.script!);
     case "assertText": {
       const actual = collapse((await (locator ?? scope.locator("body")).first().textContent(t)) ?? "");
       if (!textMatches(actual, step.text!, step.match)) {
@@ -356,8 +372,9 @@ async function runStep(step: Step, session: Session, run: FlowRun, index: number
       return void (await locator!.first().waitFor({ state: "hidden", ...t }));
     case "assertUrl": {
       const actual = page.url();
-      if (!textMatches(actual, step.text!, step.match)) {
-        throw new Error(`assertUrl failed. expected ${step.match} "${step.text}" but got "${actual}"`);
+      const expected = step.text ?? step.url!;
+      if (!textMatches(actual, expected, step.match)) {
+        throw new Error(`assertUrl failed. expected ${step.match} "${expected}" but got "${actual}"`);
       }
       return;
     }
@@ -386,6 +403,7 @@ async function runStep(step: Step, session: Session, run: FlowRun, index: number
       return;
     }
     case "assertNoErrors": {
+      await session.syncConsole();
       const errors = errorsSince(session, flowStart, step.text);
       if (errors.length) throw new Error(`assertNoErrors failed: ${errors.length} error(s): ${errors.slice(0, 5).join(" | ")}`);
       return;
@@ -416,7 +434,14 @@ async function runStep(step: Step, session: Session, run: FlowRun, index: number
       return page.evaluate(() => ({ width: window.innerWidth, height: window.innerHeight, touch: matchMedia("(pointer: coarse)").matches }));
     case "screenshot": {
       const path = step.filepath || join(run.dir, `${String(index).padStart(3, "0")}-screenshot.png`);
-      await screenshot(page, path, null, undefined, step.fullPage);
+      if (locator) await locator.first().scrollIntoViewIfNeeded(t);
+      const target = await measure(page, step);
+      await screenshot(page, path, {
+        box: target?.box,
+        label: `#${index} ${step.name ?? describe(step, target)}`,
+        fullPage: step.fullPage,
+        crop: step.crop,
+      });
       return { filepath: path };
     }
   }
@@ -441,40 +466,155 @@ async function fastFill(locator: Locator, text: string, timeout: number): Promis
   if (!done) await target.fill(text, { timeout });
 }
 
-async function measure(page: Page, step: Step): Promise<Box | null> {
+interface Target {
+  box: Box;
+  text: string;
+  secret: boolean;
+}
+
+async function measure(page: Page, step: Step): Promise<Target | null> {
   if (!step.selector) return null;
   const scope = step.frame ? page.frameLocator(step.frame) : page;
-  return scope.locator(ref(step.selector)).first().boundingBox({ timeout: 300 }).catch(() => null);
+  const element = scope.locator(ref(step.selector)).first();
+  const box = await element.boundingBox({ timeout: 300 }).catch(() => null);
+  if (!box) return null;
+  // What a person would call the element, so the label reads "Nhấn "Đăng nhập""
+  // rather than a selector or a snapshot ref.
+  const about = await element
+    .evaluate((el) => {
+      const field = el as HTMLInputElement;
+      const text =
+        el.getAttribute("aria-label") ||
+        field.labels?.[0]?.innerText.trim() ||
+        (el as HTMLElement).innerText?.trim().split("\n")[0] ||
+        field.placeholder ||
+        el.getAttribute("title") ||
+        field.name ||
+        el.id ||
+        el.tagName.toLowerCase();
+      return { text, secret: field.type === "password" };
+    }, undefined, { timeout: 300 })
+    .catch(() => ({ text: step.selector!, secret: false }));
+  return { box, ...about };
+}
+
+const quote = (value: string) => `"${clamp(collapse(value), 40)}"`;
+
+const MATCH_WORDS = { includes: "chứa", equals: "bằng", regex: "khớp" } as const;
+
+// A one-line account of the step for its evidence screenshot and the report.
+function describe(step: Step, target: Target | null): string {
+  const el = target ? quote(target.text) : step.selector ? quote(step.selector) : "";
+  const value = target?.secret ? "\"••••\"" : quote(step.text ?? "");
+  const match = MATCH_WORDS[step.match];
+  switch (step.action) {
+    case "navigate": return `Mở ${quote(step.url ?? "")}`;
+    case "newTab": return step.url ? `Mở tab mới ${quote(step.url)}` : "Mở tab mới";
+    case "reload": return "Tải lại trang";
+    case "goBack": return "Quay lại trang trước";
+    case "goForward": return "Đi tới trang sau";
+    case "press": return `Nhấn phím ${step.key}${el ? ` tại ${el}` : ""}`;
+    case "scroll": return `Cuộn trang (${step.x}, ${step.y})`;
+    case "scrollToTop": return "Cuộn lên đầu trang";
+    case "scrollToBottom": return "Cuộn xuống cuối trang";
+    case "mouseClick": return `Nhấn chuột tại (${step.x}, ${step.y})`;
+    case "wait": return `Chờ ${step.milliseconds}ms`;
+    case "waitForURL": return `Chờ URL ${match} ${quote(step.url ?? "")}`;
+    case "waitForResponse": return `Chờ phản hồi ${quote(step.url ?? "")}`;
+    case "waitForTab": return "Chờ tab mới mở";
+    case "waitForDownload": return el ? `Nhấn ${el} và chờ tải xuống` : "Chờ tải xuống";
+    case "switchTab": return `Chuyển sang tab ${step.tabIndex}`;
+    case "closeTab": return "Đóng tab";
+    case "dialog": return step.accept ? "Đồng ý hộp thoại kế tiếp" : "Huỷ hộp thoại kế tiếp";
+    case "evaluate": return "Chạy script trên trang";
+    case "extractText": return `Đọc nội dung ${el || "trang"}`;
+    case "extractHtml": return `Đọc HTML ${el}`;
+    case "extractAttribute": return `Đọc ${step.attribute} của ${el}`;
+    case "assertUrl": return `Kiểm tra URL ${match} ${quote(step.text ?? step.url ?? "")}`;
+    case "assertNotVisible": return `Kiểm tra ${el} không hiển thị`;
+    case "assertNoErrors": return "Kiểm tra không có lỗi console hoặc request";
+    case "click": return `Nhấn ${el}`;
+    case "dblclick": return `Nhấn đúp ${el}`;
+    case "rightClick": return `Nhấn chuột phải ${el}`;
+    case "hover": return `Rê chuột lên ${el}`;
+    case "focus": return `Chọn ${el}`;
+    case "clear": return `Xoá nội dung ${el}`;
+    case "check": return `Tích ${el}`;
+    case "uncheck": return `Bỏ tích ${el}`;
+    case "type":
+    case "fill": return `Nhập ${value} vào ${el}`;
+    case "selectOption": return `Chọn ${quote(step.selectedValue ?? "")} ở ${el}`;
+    case "upload": return `Tải lên ${(step.files ?? []).map((file) => basename(file)).join(", ")}`;
+    case "drag": return `Kéo ${el} đến ${quote(step.target ?? "")}`;
+    case "draw": return `Vẽ qua ${step.points?.length ?? 0} điểm`;
+    case "waitForSelector": return `Chờ ${el} hiển thị`;
+    case "assertVisible": return `Kiểm tra ${el} hiển thị`;
+    // The element's own text is the value under test, so it cannot name it.
+    case "assertText": return `Kiểm tra nội dung ${step.selector ? quote(step.selector) : "trang"} ${match} ${value}`;
+    case "assertValue": return `Kiểm tra giá trị ${el} ${match} ${value}`;
+    case "assertAttribute": return `Kiểm tra ${step.attribute} của ${el} ${match} ${value}`;
+    case "assertChecked": return `Kiểm tra ${el} ${step.checked ? "đã tích" : "chưa tích"}`;
+    case "assertCount": return `Kiểm tra có ${step.count} phần tử ${quote(step.selector ?? "")}`;
+    case "screenshot": return el ? `Chụp ${el}` : "Chụp màn hình";
+    default: return step.action;
+  }
 }
 
 export async function runBrowserFlow(steps: Step[], stopOnError: boolean, sessionId: string | undefined, evidence: EvidenceMode) {
   const root = await getSession(sessionId);
-  const run = await startRun(root);
+  const run = await startRun(root, steps.length);
+  try {
+    return await runSteps(steps, stopOnError, root, run, evidence);
+  } finally {
+    finishRun(run.evidenceDir, run.id);
+  }
+}
+
+async function runSteps(steps: Step[], stopOnError: boolean, root: Session, run: FlowRun, evidence: EvidenceMode) {
   const flowStart = Date.now();
   const variables: Record<string, unknown> = {};
   const results: Array<Record<string, unknown>> = [];
   let failureShot: string | undefined;
   let failedStep: number | undefined;
   let session = root;
+  let prior: Prior = { t: flowStart, pages: new Set(root.context.pages()) };
 
   for (const [index, rawStep] of steps.entries()) {
     const step = interpolateStep(rawStep, variables);
     const started = Date.now();
-    const record: StepRecord = { i: index, action: step.action, name: step.name, session: "", target: step.selector, ok: true, ms: 0, url: "" };
+    const record: StepRecord = { i: index, action: step.action, name: step.name, session: "", target: step.selector, ok: true, t: started, ms: 0, url: "" };
+    setRunCurrent(run.evidenceDir, run.id, index, step.name ?? describe(step, null));
 
     try {
       session = step.session ? await getSession(step.session) : root;
       record.session = session.id;
       const page = await session.activePage();
-      let box: Box | null = null;
-      if (evidence === "steps" && BOX_BEFORE.has(step.action)) box = await measure(page, step);
+      const before: Prior = { t: started, pages: new Set(session.context.pages()) };
+      await session.syncConsole();
+      let target: Target | null = null;
+      if (evidence === "steps" && BOX_BEFORE.has(step.action)) target = await measure(page, step);
+      record.label = step.name ?? describe(step, target);
 
-      const value = await runStep(step, session, run, index, flowStart);
+      // The flow holds only its own session; a step in another one takes that
+      // session's lock for just the step, so two flows crossing each other
+      // stall for one lock wait at most, not for each other's whole run.
+      const value = session === root
+        ? await runStep(step, session, run, index, flowStart, prior)
+        : await exclusive(session.id, () => runStep(step, session, run, index, flowStart, prior));
+      prior = before;
+      if (step.action === "screenshot") record.shot = (value as { filepath?: string } | undefined)?.filepath;
 
       if (evidence === "steps" && !NO_SHOT.has(step.action)) {
         const current = await session.activePage();
-        if (!box && BOX_AFTER.has(step.action)) box = await measure(current, step);
-        record.shot = await screenshot(current, shotPath(run, index, step.action, session.id, false), box, `#${index} ${step.action}`).catch(() => undefined);
+        if (!target && BOX_AFTER.has(step.action)) {
+          target = await measure(current, step);
+          record.label = step.name ?? describe(step, target);
+        }
+        record.shot = await screenshot(current, shotPath(run, index, step.action, session.id, false), {
+          box: target?.box,
+          label: `#${index} ${record.label}`,
+          kind: BOX_AFTER.has(step.action) ? "assert" : "action",
+        }).catch(() => undefined);
       }
 
       if (step.variable) variables[step.variable] = clampValue(value, step.maxLength);
@@ -498,17 +638,23 @@ export async function runBrowserFlow(steps: Step[], stopOnError: boolean, sessio
       if (evidence !== "off") {
         const page = await session.activePage().catch(() => null);
         if (page) {
-          const box = await measure(page, step);
-          record.shot = await screenshot(page, shotPath(run, index, step.action, session.id, true), box, `#${index} FAILED`).catch(() => undefined);
+          const target = await measure(page, step);
+          record.label = step.name ?? describe(step, target);
+          record.shot = await screenshot(page, shotPath(run, index, step.action, session.id, true), {
+            box: target?.box,
+            label: `#${index} LỖI · ${record.label}`,
+            kind: "fail",
+          }).catch(() => undefined);
           failureShot ??= record.shot;
         }
       }
       results.push({ i: index, action: step.action, ok: false, ...(step.name ? { name: step.name } : {}), error });
       if (!step.continueOnError && stopOnError) failedStep = index;
     } finally {
+      await session.syncConsole().catch(() => {});
       record.ms = Date.now() - started;
       record.url = session.page.isClosed() ? "" : session.page.url();
-      run.steps.push(record);
+      recordStep(run, record);
     }
     if (failedStep !== undefined) break;
   }
@@ -518,6 +664,7 @@ export async function runBrowserFlow(steps: Step[], stopOnError: boolean, sessio
   const passed = results.filter((result) => result.ok === true).length;
   const notable = results.filter((result) => result.ok !== true || "value" in result || "name" in result);
   const page = await root.activePage();
+  if (session !== root) await root.syncConsole();
   const errors = passed < results.length ? errorsSince(root, flowStart).slice(-5) : [];
   return {
     success: failedStep === undefined && passed === results.length,

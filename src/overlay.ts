@@ -1,13 +1,16 @@
 // Both scripts run as context init scripts, so they are serialized and must be
 // self-contained: no imports, no closures over module scope.
 
+export type MarkKind = "action" | "assert" | "fail";
+
 declare global {
   interface Window {
     __mcpOverlay?: {
-      highlight(rect: { x: number; y: number; width: number; height: number }, label?: string): void;
+      highlight(rect: { x: number; y: number; width: number; height: number }, label?: string, kind?: MarkKind): void;
       clear(): void;
     };
     __mcpVitals?: { lcp: number; cls: number; longTasks: number; longTaskMs: number };
+    __mcpConsole?: { drain(): Array<{ t: number; type: string; text: string; url?: string }> };
   }
 }
 
@@ -23,19 +26,27 @@ export function overlayScript(): void {
   const root = host.attachShadow({ mode: "closed" });
   root.innerHTML = `<style>
     canvas{position:fixed;inset:0;pointer-events:none}
-    .cursor{position:fixed;left:0;top:0;width:18px;height:18px;margin:-2px 0 0 -2px;pointer-events:none;transition:transform .02s linear;display:none}
-    .ripple{position:fixed;width:28px;height:28px;margin:-14px 0 0 -14px;border-radius:50%;border:3px solid #ff2d55;pointer-events:none;animation:r .5s ease-out forwards}
-    .box{position:fixed;border:2px solid #ff2d55;background:rgba(255,45,85,.08);border-radius:3px;pointer-events:none;box-sizing:border-box}
-    .tag{position:absolute;left:-2px;bottom:100%;background:#ff2d55;color:#fff;font:600 11px/16px system-ui,sans-serif;padding:0 5px;border-radius:3px 3px 0 0;white-space:nowrap}
-    @keyframes r{from{transform:scale(.3);opacity:1}to{transform:scale(1.6);opacity:0}}
-  </style><canvas></canvas><svg class="cursor" viewBox="0 0 18 18"><path d="M1 1l6.5 15 2.2-6.3L16 7.5z" fill="#111" stroke="#fff" stroke-width="1.4" stroke-linejoin="round"/></svg>`;
+    .cursor{position:fixed;left:0;top:0;width:24px;height:24px;margin:-2px 0 0 -3px;transform-origin:3px 2px;pointer-events:none;overflow:visible;filter:drop-shadow(0 1px 1.5px rgba(0,0,0,.4));display:none}
+    .ripple{position:fixed;width:36px;height:36px;margin:-18px 0 0 -18px;border-radius:50%;border:2px solid rgba(255,45,85,.9);background:rgba(255,45,85,.18);box-sizing:border-box;pointer-events:none;animation:r .55s cubic-bezier(.2,.7,.3,1) forwards}
+    .mark{position:fixed;width:22px;height:22px;margin:-11px 0 0 -11px;border-radius:50%;border:2px solid #ff2d55;background:rgba(255,45,85,.2);box-sizing:border-box;pointer-events:none}
+    .mark::after{content:"";position:absolute;inset:5px;border-radius:50%;background:#ff2d55;box-shadow:0 0 0 1.5px #fff}
+    .box{--c:47,111,235;position:fixed;border:2px solid rgb(var(--c));background:rgba(var(--c),.07);border-radius:4px;pointer-events:none;box-sizing:border-box}
+    .box.assert{--c:26,127,55}
+    .box.fail{--c:207,34,46}
+    .tag{position:absolute;left:-2px;bottom:100%;max-width:520px;overflow:hidden;text-overflow:ellipsis;background:rgb(var(--c));color:#fff;font:600 12px/18px system-ui,sans-serif;padding:0 6px;border-radius:4px 4px 0 0;white-space:nowrap}
+    .tag.below{bottom:auto;top:100%;border-radius:0 0 4px 4px}
+    @keyframes r{from{transform:scale(.2);opacity:1}to{transform:scale(1.5);opacity:0}}
+  </style><canvas></canvas><svg class="cursor" viewBox="0 0 24 24"><path d="M3 2v17.5l4.6-4.1 3 6.6 3-1.3-3-6.5h6.2z" fill="#111" stroke="#fff" stroke-width="1.5" stroke-linejoin="round"/></svg>`;
   const canvas = root.querySelector("canvas")!;
   const cursor = root.querySelector<SVGElement>(".cursor")!;
   const ctx = canvas.getContext("2d")!;
   const trail: Array<{ x: number; y: number; t: number }> = [];
   const TRAIL_MS = 700;
+  const TRAIL_WIDTH = 6;
   let drawing = false;
   let down = false;
+  let x = 0;
+  let y = 0;
 
   const mount = () => {
     if (!host.isConnected) document.documentElement.appendChild(host);
@@ -47,32 +58,73 @@ export function overlayScript(): void {
     canvas.style.height = `${innerHeight}px`;
   };
 
+  // The trail is one filled ribbon rather than a stroke per segment: stroked
+  // translucent segments overlap at every joint and leave visible beads.
+  const ribbon = (side: Array<{ x: number; y: number }>) => {
+    ctx.lineTo(side[0].x, side[0].y);
+    for (let i = 1; i < side.length - 1; i++) {
+      ctx.quadraticCurveTo(side[i].x, side[i].y, (side[i].x + side[i + 1].x) / 2, (side[i].y + side[i + 1].y) / 2);
+    }
+    ctx.lineTo(side[side.length - 1].x, side[side.length - 1].y);
+  };
+
   const frame = () => {
     const now = performance.now();
     while (trail.length && now - trail[0].t > TRAIL_MS) trail.shift();
     ctx.setTransform(devicePixelRatio, 0, 0, devicePixelRatio, 0, 0);
     ctx.clearRect(0, 0, innerWidth, innerHeight);
-    ctx.lineCap = "round";
-    for (let i = 1; i < trail.length; i++) {
-      const age = Math.max(0, (now - trail[i].t) / TRAIL_MS);
-      ctx.strokeStyle = `rgba(255,45,85,${(1 - age) * 0.8})`;
-      ctx.lineWidth = 3 * (1 - age) + 1;
+    const n = trail.length;
+    if (n > 1) {
+      const left: Array<{ x: number; y: number }> = [];
+      const right: Array<{ x: number; y: number }> = [];
+      let nx = 0;
+      let ny = 0;
+      for (let i = 0; i < n; i++) {
+        const a = trail[Math.max(0, i - 1)];
+        const b = trail[Math.min(n - 1, i + 1)];
+        const len = Math.hypot(b.x - a.x, b.y - a.y);
+        if (len > 0) {
+          nx = -(b.y - a.y) / len;
+          ny = (b.x - a.x) / len;
+        }
+        const age = Math.min(1, Math.max(0, (now - trail[i].t) / TRAIL_MS));
+        const half = (TRAIL_WIDTH / 2) * (i / (n - 1)) * (1 - age);
+        left.push({ x: trail[i].x + nx * half, y: trail[i].y + ny * half });
+        right.push({ x: trail[i].x - nx * half, y: trail[i].y - ny * half });
+      }
+      const tail = trail[0];
+      const head = trail[n - 1];
+      const gradient = ctx.createLinearGradient(tail.x, tail.y, head.x, head.y);
+      gradient.addColorStop(0, "rgba(255,45,85,0)");
+      gradient.addColorStop(1, "rgba(255,45,85,.7)");
+      ctx.fillStyle = gradient;
       ctx.beginPath();
-      ctx.moveTo(trail[i - 1].x, trail[i - 1].y);
-      ctx.lineTo(trail[i].x, trail[i].y);
-      ctx.stroke();
+      ctx.moveTo(tail.x, tail.y);
+      ribbon(left);
+      ribbon(right.reverse());
+      ctx.closePath();
+      ctx.fill();
     }
-    drawing = trail.length > 0;
+    drawing = n > 0;
     if (drawing) requestAnimationFrame(frame);
+  };
+
+  const place = () => {
+    cursor.style.transform = `translate(${x}px,${y}px) scale(${down ? 0.85 : 1})`;
   };
 
   addEventListener("mousemove", (e) => {
     mount();
     cursor.style.display = "block";
-    cursor.style.transform = `translate(${e.clientX}px,${e.clientY}px)`;
+    x = e.clientX;
+    y = e.clientY;
+    place();
     // While a button is held the trail is kept longer, so a drag or a drawn
     // stroke stays readable in the screenshot taken right after it.
-    trail.push({ x: e.clientX, y: e.clientY, t: performance.now() + (down ? 800 : 0) });
+    const t = performance.now() + (down ? 800 : 0);
+    const last = trail[trail.length - 1];
+    if (last && last.x === x && last.y === y) last.t = t;
+    else trail.push({ x, y, t });
     if (!drawing) {
       drawing = true;
       requestAnimationFrame(frame);
@@ -81,39 +133,94 @@ export function overlayScript(): void {
   addEventListener("mousedown", (e) => {
     down = true;
     mount();
+    place();
     const ripple = document.createElement("div");
     ripple.className = "ripple";
     ripple.style.left = `${e.clientX}px`;
     ripple.style.top = `${e.clientY}px`;
     root.appendChild(ripple);
     setTimeout(() => ripple.remove(), 600);
+    // Evidence screenshots fast-forward CSS animations to their last frame,
+    // where the ripple is invisible, so a static mark records the click.
+    root.querySelectorAll(".mark").forEach((el) => el.remove());
+    const mark = document.createElement("div");
+    mark.className = "mark";
+    mark.style.left = `${e.clientX}px`;
+    mark.style.top = `${e.clientY}px`;
+    root.appendChild(mark);
+    setTimeout(() => mark.remove(), 3000);
   }, true);
-  addEventListener("mouseup", () => { down = false; }, true);
+  addEventListener("mouseup", () => {
+    down = false;
+    place();
+  }, true);
   addEventListener("resize", resize);
   resize();
 
   window.__mcpOverlay = {
-    highlight(rect, label) {
+    highlight(rect, label, kind = "action") {
       mount();
+      // Padded so the outline does not sit on the element's own border or text.
+      const pad = 4;
+      const top = rect.y - pad;
       const box = document.createElement("div");
-      box.className = "box";
-      box.style.cssText = `left:${rect.x}px;top:${rect.y}px;width:${rect.width}px;height:${rect.height}px`;
+      box.className = `box ${kind}`;
+      box.style.cssText = `left:${rect.x - pad}px;top:${top}px;width:${rect.width + pad * 2}px;height:${rect.height + pad * 2}px`;
       if (label) {
         const tag = document.createElement("div");
-        tag.className = "tag";
+        tag.className = top < 20 ? "tag below" : "tag";
         tag.textContent = label;
         box.appendChild(tag);
       }
       root.appendChild(box);
     },
     clear() {
-      root.querySelectorAll(".box").forEach((el) => el.remove());
+      root.querySelectorAll(".box, .mark, .ripple").forEach((el) => el.remove());
     },
   };
   Object.defineProperty(window, "__mcpOverlay", { enumerable: false });
 
   if (document.documentElement) mount();
   else document.addEventListener("DOMContentLoaded", mount, { once: true });
+}
+
+// CloakBrowser's Chromium never reports console messages or uncaught errors
+// over CDP, nor binding calls, so the page keeps them itself until the session
+// drains them with an evaluate.
+export function consoleScript(): void {
+  if (window !== window.top || window.__mcpConsole) return;
+  const buffer: Array<{ t: number; type: string; text: string; url?: string }> = [];
+  const push = (type: string, text: string, url?: string) => {
+    buffer.push({ t: Date.now(), type, text, ...(url ? { url } : {}) });
+    if (buffer.length > 500) buffer.shift();
+  };
+  const show = (value: unknown) => {
+    if (value instanceof Error) return value.stack || `${value.name}: ${value.message}`;
+    if (typeof value === "string") return value;
+    try {
+      return JSON.stringify(value) ?? String(value);
+    } catch {
+      return String(value);
+    }
+  };
+  const levels = { log: "log", info: "info", debug: "debug", warn: "warning", error: "error" } as const;
+  for (const [method, type] of Object.entries(levels)) {
+    const original = console[method as keyof typeof levels];
+    const wrapped = function (this: Console, ...args: unknown[]) {
+      push(type, args.map(show).join(" "));
+      return original.apply(this, args);
+    };
+    // Pages that fingerprint console methods read their source text.
+    Object.defineProperty(wrapped, "toString", { value: () => original.toString(), enumerable: false });
+    Object.defineProperty(wrapped, "name", { value: original.name });
+    console[method as keyof typeof levels] = wrapped;
+  }
+  // The message alone, as Playwright's own pageerror carries, so the two match.
+  addEventListener("error", (e) => {
+    if (e.error !== undefined || e.message) push("pageerror", e.error instanceof Error ? e.error.message : e.message, e.filename ? `${e.filename}:${e.lineno}` : undefined);
+  });
+  addEventListener("unhandledrejection", (e) => push("pageerror", `Unhandled rejection: ${show(e.reason)}`));
+  Object.defineProperty(window, "__mcpConsole", { value: { drain: () => buffer.splice(0) }, enumerable: false });
 }
 
 // LCP and CLS are only observable from inside the page, and only from load
