@@ -118,8 +118,15 @@ takes an optional `session`.
 
 ## Sessions
 
-A session is an isolated browser: own cookies, storage and fingerprint. Naming
-one is enough to start it, so two users of a chat or a checkout are one flow:
+A session is an isolated browser: own cookies, storage and fingerprint. Session
+ids are shared by every MCP client on the machine, so separate tasks use
+separate ids and only tasks that name the same id share a browser. A call
+without `session` goes to the client's own default (`task-<random>`), which no
+other client lands in; set `BROWSER_SESSION` to pin its name, e.g. to resume a
+task's browser after a restart.
+
+Naming a session is enough to start it, so two users of a chat or a checkout
+are one flow:
 
 ```json
 { "steps": [
@@ -145,6 +152,7 @@ browser_session { action: "open", id: "u1", storageState: "/tmp/u1.json" } // sk
 browser_session { action: "open", id: "vpn", proxy: "http://user:pass@host:8080", locale: "vi-VN", timezone: "Asia/Ho_Chi_Minh" }
 browser_session { action: "list" }
 browser_session { action: "use", id: "admin" }    // make it the default for later calls
+browser_session { action: "use" }                 // back to this client's own default
 browser_session { action: "close", id: "admin" }  // returns the video/HAR paths
 ```
 
@@ -179,12 +187,19 @@ Closing that session only detaches; your Chrome and its tabs stay open.
 
 While the server runs it also serves a small web page at
 **http://127.0.0.1:9330/** (the URL is printed on stderr and returned by
-`browser_session { action: "list" }` as `ui`).
+`browser_session { action: "list" }` as `ui`). Every instance on the machine
+shares one dashboard: the first to start serves it, the others stand by and
+take over within a few seconds when it exits. It updates live over
+server-sent events.
 
-- **Session**: every open session with a live screenshot, its tabs (click to
-  switch), request and console-error counts, and recording state. Open a new
-  session, navigate, go back, reload, make one the default, write its report,
-  or close it.
+- **Session**: every session any instance has open, with a live screenshot,
+  its tabs (click to switch), request and console-error counts, recording
+  state, and the progress of a running flow. Open a new session, navigate, go
+  back, reload, make one the default, write its report, or close it. Acting on
+  another instance's session waits for its lock, so it never drives a page an
+  agent is on.
+- **Run history**: recent flows from every session, with step thumbnails,
+  pass/fail and the step running right now.
 - **Assets**: the evidence folders under `BROWSER_EVIDENCE_DIR`, newest first,
   with step screenshots grouped per run, failed steps marked, filters by type
   and name, and a viewer for images, videos, PDFs and `report.html`. Download,
@@ -196,7 +211,9 @@ While the server runs it also serves a small web page at
 | Variable | Effect |
 |---|---|
 | `BROWSER_UI=0` | Do not start the dashboard |
-| `BROWSER_UI_PORT=9400` | First port to try (default 9330); a busy port moves to the next, up to 10 |
+| `BROWSER_UI_PORT=9400` | First port to try (default 9330); a port another program holds moves to the next, up to 10 |
+| `BROWSER_DB=/path/data.db` | Shared session store (default `~/.mcp-simple-browser/data.db`) |
+| `BROWSER_SESSION=name` | Name of this instance's default session (default `task-<random>`) |
 
 It listens on 127.0.0.1 only and has no login. Requests with a non-loopback
 `Host` are refused, and anything that changes state needs an `X-MCP-UI`

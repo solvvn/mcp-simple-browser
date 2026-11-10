@@ -1,613 +1,1064 @@
-// The dashboard's single page. Plain DOM, no build step, no external requests.
-// Written without backticks or template placeholders so it can live in this
-// template literal untouched.
-export const dashboardHtml: string = `<!doctype html>
+// The dashboard is one self-contained page: no build step, no external assets.
+// It is written without template literals so it can live in String.raw.
+export const dashboardHtml = String.raw`<!doctype html>
 <html lang="vi">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Simple Browser</title>
 <style>
-:root{
-  --bg:#f4f5f7;--panel:#fff;--sunken:#f0f1f4;--field:#fff;
-  --fg:#16181d;--fg2:#4b5161;--muted:#7a8090;--line:#e3e5ea;--line2:#cfd3db;
-  --accent:#4f46e5;--accent-fg:#fff;--accent-soft:#eef0ff;--ring:rgba(79,70,229,.22);
-  --ok:#15803d;--ok-soft:#e8f6ed;--fail:#dc2626;--fail-soft:#fdecec;--warn:#b45309;--warn-soft:#fdf3e4;
-  --shadow:0 1px 2px rgba(16,24,40,.05),0 1px 3px rgba(16,24,40,.06);
-  --shadow-lg:0 12px 32px -8px rgba(16,24,40,.18),0 4px 8px -4px rgba(16,24,40,.08);
-  --chev:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 24 24' fill='none' stroke='%237a8090' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
-  color-scheme:light;
+:root {
+  --bg: #f5f6f8; --surface: #ffffff; --sunken: #eef0f3; --border: #dfe3e8; --border-strong: #c9ced6;
+  --text: #16191f; --muted: #5a6371; --faint: #8a93a1;
+  --accent: #2563eb; --accent-text: #ffffff; --accent-soft: #e8efff;
+  --ok: #1a7f37; --ok-soft: #e6f4ea; --bad: #c4232f; --bad-soft: #fdecee; --warn: #8a5a00; --warn-soft: #fff4d6;
+  --shadow: 0 1px 2px rgba(16, 24, 40, .06);
+  --radius: 8px;
+  color-scheme: light;
 }
-@media (prefers-color-scheme:dark){:root{
-  --bg:#0b0c10;--panel:#14161c;--sunken:#0f1116;--field:#0f1116;
-  --fg:#eceef3;--fg2:#b4b9c6;--muted:#7d8496;--line:#242833;--line2:#323744;
-  --accent:#7c74ff;--accent-fg:#fff;--accent-soft:#1d1b3a;--ring:rgba(124,116,255,.3);
-  --ok:#3ecf74;--ok-soft:#10261a;--fail:#f26666;--fail-soft:#2e1416;--warn:#f0a646;--warn-soft:#2c1f0c;
-  --shadow:0 1px 2px rgba(0,0,0,.4);--shadow-lg:0 16px 40px -8px rgba(0,0,0,.6);
-  color-scheme:dark;
-}}
-*{box-sizing:border-box}
-html{-webkit-text-size-adjust:100%}
-body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.5 ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;-webkit-font-smoothing:antialiased}
-svg.i{width:16px;height:16px;flex:none;stroke:currentColor;fill:none;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}
-
-/* ---------- header ---------- */
-header{position:sticky;top:0;z-index:10;background:color-mix(in srgb,var(--panel) 85%,transparent);backdrop-filter:saturate(1.6) blur(12px);-webkit-backdrop-filter:saturate(1.6) blur(12px);border-bottom:1px solid var(--line)}
-.hwrap{max-width:1440px;margin:0 auto;padding:10px 20px;display:flex;align-items:center;gap:20px}
-.brand{display:flex;align-items:center;gap:10px;font-weight:650;font-size:15px;letter-spacing:-.01em;white-space:nowrap}
-.logo{width:28px;height:28px;border-radius:8px;background:linear-gradient(135deg,#6366f1,#a855f7);display:grid;place-items:center;color:#fff;box-shadow:inset 0 0 0 1px rgba(255,255,255,.15)}
-.logo svg.i{width:16px;height:16px}
-.seg{display:inline-flex;padding:3px;background:var(--sunken);border:1px solid var(--line);border-radius:10px;gap:2px}
-.seg button{all:unset;cursor:pointer;display:inline-flex;align-items:center;gap:6px;padding:5px 12px;border-radius:7px;color:var(--muted);font-weight:550;font-size:13px}
-.seg button:hover{color:var(--fg)}
-.seg button.on{background:var(--panel);color:var(--fg);box-shadow:var(--shadow)}
-.seg .count{font-size:11px;min-width:18px;text-align:center;padding:0 5px;border-radius:9px;background:var(--line);color:var(--fg2)}
-.seg button.on .count{background:var(--accent-soft);color:var(--accent)}
-.spacer{flex:1}
-.status{display:flex;align-items:center;gap:8px;color:var(--muted);font-size:12.5px;white-space:nowrap}
-.dot{width:8px;height:8px;border-radius:50%;background:var(--ok);box-shadow:0 0 0 3px var(--ok-soft)}
-.dot.off{background:var(--fail);box-shadow:0 0 0 3px var(--fail-soft)}
-main{max-width:1440px;margin:0 auto;padding:20px}
-
-/* ---------- controls ---------- */
-.field{display:grid;gap:5px;min-width:0}
-.field>span{font-size:12px;font-weight:550;color:var(--fg2)}
-input[type=text],input:not([type]),select{
-  height:36px;width:100%;padding:0 12px;border:1px solid var(--line2);border-radius:8px;background:var(--field);color:var(--fg);
-  font:inherit;font-size:13.5px;outline:none;transition:border-color .15s,box-shadow .15s;min-width:0}
-input::placeholder{color:var(--muted)}
-input:hover,select:hover{border-color:color-mix(in srgb,var(--line2) 50%,var(--fg2))}
-input:focus,select:focus{border-color:var(--accent);box-shadow:0 0 0 3px var(--ring)}
-select{appearance:none;-webkit-appearance:none;padding-right:34px;background-image:var(--chev);background-repeat:no-repeat;background-position:right 10px center;cursor:pointer}
-.inputwrap{position:relative;display:flex;align-items:center;min-width:0;flex:1}
-.inputwrap svg.i{position:absolute;left:11px;color:var(--muted);pointer-events:none}
-.inputwrap input{padding-left:34px}
-
-.btn{display:inline-flex;align-items:center;justify-content:center;gap:6px;height:32px;padding:0 12px;border:1px solid var(--line2);border-radius:8px;background:var(--panel);color:var(--fg);font:inherit;font-size:13px;font-weight:550;cursor:pointer;text-decoration:none;white-space:nowrap;transition:background .15s,border-color .15s,color .15s,box-shadow .15s;box-shadow:var(--shadow)}
-.btn:hover{background:var(--sunken)}
-.btn:focus-visible{outline:none;box-shadow:0 0 0 3px var(--ring)}
-.btn:disabled{opacity:.45;cursor:not-allowed}
-.btn.lg{height:36px;padding:0 16px}
-.btn.primary{background:var(--accent);border-color:var(--accent);color:var(--accent-fg)}
-.btn.primary:hover{background:color-mix(in srgb,var(--accent) 88%,#000)}
-.btn.ghost{background:none;border-color:transparent;box-shadow:none;color:var(--fg2)}
-.btn.ghost:hover{background:var(--sunken);color:var(--fg)}
-.btn.danger{color:var(--fail)}
-.btn.danger:hover{background:var(--fail-soft);border-color:color-mix(in srgb,var(--fail) 35%,var(--line2))}
-.btn.icon{width:32px;padding:0}
-.btn.sm{height:28px;padding:0 9px;font-size:12.5px}
-.btn.sm.icon{width:28px}
-
-.switch{display:inline-flex;align-items:center;gap:8px;cursor:pointer;user-select:none;font-size:13px;color:var(--fg2);white-space:nowrap}
-.switch input{appearance:none;-webkit-appearance:none;margin:0;width:34px;height:20px;border-radius:10px;background:var(--line2);position:relative;cursor:pointer;transition:background .2s;outline:none}
-.switch input::after{content:"";position:absolute;top:2px;left:2px;width:16px;height:16px;border-radius:50%;background:#fff;box-shadow:0 1px 2px rgba(0,0,0,.25);transition:transform .2s}
-.switch input:checked{background:var(--accent)}
-.switch input:checked::after{transform:translateX(14px)}
-.switch input:focus-visible{box-shadow:0 0 0 3px var(--ring)}
-
-.badge{display:inline-flex;align-items:center;gap:4px;height:20px;padding:0 8px;border-radius:10px;font-size:11.5px;font-weight:550;background:var(--sunken);color:var(--fg2);border:1px solid var(--line);white-space:nowrap}
-.badge.accent{background:var(--accent-soft);color:var(--accent);border-color:transparent}
-.badge.fail{background:var(--fail-soft);color:var(--fail);border-color:transparent}
-.badge.ok{background:var(--ok-soft);color:var(--ok);border-color:transparent}
-.badge.rec{background:var(--warn-soft);color:var(--warn);border-color:transparent}
-.badge.rec::before{content:"";width:6px;height:6px;border-radius:50%;background:currentColor;animation:pulse 1.4s infinite}
-@keyframes pulse{50%{opacity:.3}}
-
-.panel{background:var(--panel);border:1px solid var(--line);border-radius:12px;box-shadow:var(--shadow)}
-.muted{color:var(--muted)}
-
-/* ---------- sessions ---------- */
-.toolbar{display:grid;grid-template-columns:minmax(140px,1fr) minmax(200px,2fr) minmax(130px,1fr) minmax(150px,1fr) auto;gap:12px;align-items:end;padding:16px;margin-bottom:20px}
-.sechead{display:flex;align-items:center;gap:12px;margin:0 0 14px}
-.sechead h2{font-size:15px;font-weight:650;margin:0;letter-spacing:-.01em}
-.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(380px,1fr));gap:18px}
-.card{background:var(--panel);border:1px solid var(--line);border-radius:14px;overflow:hidden;display:flex;flex-direction:column;box-shadow:var(--shadow);transition:box-shadow .2s,border-color .2s}
-.card:hover{box-shadow:var(--shadow-lg)}
-.card.active{border-color:color-mix(in srgb,var(--accent) 55%,var(--line))}
-.chrome{display:flex;align-items:center;gap:10px;padding:8px 10px;background:var(--sunken);border-bottom:1px solid var(--line)}
-.lights{display:flex;gap:5px}
-.lights i{width:9px;height:9px;border-radius:50%;background:var(--line2)}
-.card.active .lights i:nth-child(1){background:#ff5f57}.card.active .lights i:nth-child(2){background:#febc2e}.card.active .lights i:nth-child(3){background:#28c840}
-.addr{flex:1;min-width:0;height:24px;display:flex;align-items:center;gap:6px;padding:0 10px;border-radius:6px;background:var(--panel);border:1px solid var(--line);font-size:12px;color:var(--fg2)}
-.addr span{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.addr svg.i{width:12px;height:12px;color:var(--muted)}
-.shotwrap{position:relative;aspect-ratio:16/9;background:var(--sunken);cursor:zoom-in;overflow:hidden}
-.shotwrap img{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;object-position:top left;display:block}
-.shotwrap .ph{position:absolute;inset:0;display:grid;place-items:center;color:var(--muted);font-size:12.5px}
-.shotwrap .zoom{position:absolute;right:10px;bottom:10px;opacity:0;transition:opacity .15s;background:rgba(0,0,0,.6);color:#fff;border-radius:6px;padding:4px 8px;font-size:12px;display:flex;gap:5px;align-items:center}
-.shotwrap:hover .zoom{opacity:1}
-.cbody{padding:14px 16px 16px;display:grid;gap:12px}
-.ctitle{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
-.ctitle b{font-size:16px;font-weight:650;letter-spacing:-.01em;margin-right:2px}
-.tabs{display:grid;gap:2px;margin:0 -6px}
-.tab{display:flex;align-items:center;gap:8px;padding:5px 8px;border-radius:7px;cursor:pointer;font-size:12.5px;color:var(--fg2);min-width:0}
-.tab:hover{background:var(--sunken)}
-.tab.cur{background:var(--accent-soft);color:var(--fg)}
-.tab .n{font-size:11px;color:var(--muted);width:14px;text-align:right;flex:none}
-.tab .t{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-weight:550}
-.tab .u{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:var(--muted);flex:1;min-width:0}
-.stats{display:flex;gap:6px;flex-wrap:wrap}
-.go{display:flex;gap:8px}
-.actions{display:flex;gap:6px;align-items:center;flex-wrap:wrap;padding-top:12px;border-top:1px solid var(--line)}
-.path{font:12px ui-monospace,SFMono-Regular,Menlo,monospace;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-
-/* ---------- assets ---------- */
-.filters{display:flex;gap:10px;align-items:center;flex-wrap:wrap;padding:12px;margin-bottom:18px}
-.filters select{width:150px}
-.filters .inputwrap{max-width:280px}
-.layout{display:grid;grid-template-columns:300px minmax(0,1fr);gap:18px;align-items:start}
-.folders{position:sticky;top:76px;max-height:calc(100vh - 96px);overflow-y:auto;padding:6px}
-.folder{display:grid;gap:3px;padding:10px 12px;border-radius:9px;cursor:pointer}
-.folder:hover{background:var(--sunken)}
-.folder.sel{background:var(--accent-soft)}
-.folder .n{display:flex;align-items:center;gap:8px;font-weight:600;font-size:13px;min-width:0}
-.folder .n span{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.folder .n svg.i{color:var(--muted)}
-.folder.sel .n svg.i{color:var(--accent)}
-.folder .m{font-size:11.5px;color:var(--muted);padding-left:24px}
-.fhead{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:16px}
-.fhead h2{margin:0;font-size:16px;font-weight:650;word-break:break-all;letter-spacing:-.01em}
-.group{display:flex;align-items:center;gap:8px;margin:22px 0 10px;font-size:13px;font-weight:650;color:var(--fg2)}
-.group:first-of-type{margin-top:4px}
-.group::after{content:"";flex:1;height:1px;background:var(--line)}
-.files{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:14px}
-.file{background:var(--panel);border:1px solid var(--line);border-radius:12px;overflow:hidden;display:flex;flex-direction:column;box-shadow:var(--shadow);transition:box-shadow .2s}
-.file:hover{box-shadow:var(--shadow-lg)}
-.file.fail{border-color:color-mix(in srgb,var(--fail) 45%,var(--line))}
-.thumb{all:unset;position:relative;display:grid;place-items:center;aspect-ratio:16/9;background:var(--sunken);cursor:zoom-in;overflow:hidden;color:var(--muted);border-bottom:1px solid var(--line)}
-.thumb img{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;object-position:top left}
-.thumb svg.i{width:30px;height:30px;stroke-width:1.5}
-.thumb .tag{position:absolute;left:8px;top:8px}
-.fmeta{padding:10px 12px 12px;display:grid;gap:8px}
-.fname{font-size:12.5px;font-weight:600;word-break:break-all;line-height:1.35}
-.fsub{display:flex;align-items:center;justify-content:space-between;gap:6px;font-size:11.5px;color:var(--muted)}
-.facts{display:flex;gap:2px}
-.empty{display:grid;place-items:center;gap:8px;padding:48px 20px;text-align:center;color:var(--muted);border:1px dashed var(--line2);border-radius:14px;background:var(--panel)}
-.empty svg.i{width:28px;height:28px;stroke-width:1.5}
-
-/* ---------- viewer & toast ---------- */
-#viewer{position:fixed;inset:0;background:rgba(8,9,12,.82);backdrop-filter:blur(4px);display:none;z-index:40;flex-direction:column}
-#viewer.on{display:flex}
-#viewer .top{display:flex;gap:8px;align-items:center;padding:12px 16px;color:#fff}
-#viewer .top span{flex:1;font-size:13px;font-weight:550;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-#viewer .top .btn{background:rgba(255,255,255,.1);border-color:rgba(255,255,255,.15);color:#fff;box-shadow:none}
-#viewer .top .btn:hover{background:rgba(255,255,255,.2)}
-#viewer .stage{flex:1;display:flex;align-items:center;justify-content:center;overflow:auto;padding:0 16px 16px;min-height:0}
-#viewer img,#viewer video{max-width:100%;max-height:100%;object-fit:contain;border-radius:8px;box-shadow:0 20px 60px rgba(0,0,0,.5)}
-#viewer iframe{width:100%;height:100%;border:0;background:#fff;border-radius:10px}
-#toast{position:fixed;bottom:20px;left:50%;transform:translate(-50%,12px);display:flex;align-items:center;gap:8px;background:var(--fg);color:var(--bg);padding:10px 16px;border-radius:10px;font-size:13px;font-weight:550;opacity:0;transition:opacity .2s,transform .2s;pointer-events:none;z-index:50;max-width:calc(100vw - 32px);box-shadow:var(--shadow-lg)}
-#toast.on{opacity:1;transform:translate(-50%,0)}
-#toast.err{background:var(--fail);color:#fff}
-
-@media (max-width:900px){
-  .toolbar{grid-template-columns:1fr 1fr}
-  .toolbar .wide{grid-column:1/-1}
-  .layout{grid-template-columns:1fr}
-  .folders{position:static;max-height:260px}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #0e1013; --surface: #16191e; --sunken: #1d2127; --border: #2a2f37; --border-strong: #3a414c;
+    --text: #e7e9ed; --muted: #a1a9b6; --faint: #6e7683;
+    --accent: #4d8dff; --accent-text: #0b1220; --accent-soft: #1a2a48;
+    --ok: #4ac26b; --ok-soft: #13291a; --bad: #ff6b72; --bad-soft: #3a1418; --warn: #e3b341; --warn-soft: #33290f;
+    --shadow: none;
+    color-scheme: dark;
+  }
 }
-@media (max-width:560px){
-  .hwrap{padding:10px 16px;gap:12px;flex-wrap:wrap}
-  .status{order:3;width:100%}
-  main{padding:16px}
-  .grid{grid-template-columns:1fr}
-  .toolbar{grid-template-columns:1fr}
-  .files{grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}
-  .filters select,.filters .inputwrap{width:100%;max-width:none}
+* { box-sizing: border-box; }
+html, body { margin: 0; }
+body { background: var(--bg); color: var(--text); font: 14px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; -webkit-font-smoothing: antialiased; }
+.mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12.5px; }
+.muted { color: var(--muted); }
+.num { font-variant-numeric: tabular-nums; }
+[hidden] { display: none !important; }
+a { color: var(--accent); text-decoration: none; }
+a:hover { text-decoration: underline; }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+/* Header */
+header { position: sticky; top: 0; z-index: 10; background: var(--surface); border-bottom: 1px solid var(--border); }
+.bar { max-width: 1320px; margin: 0 auto; padding: 0 24px; height: 56px; display: flex; align-items: center; gap: 28px; }
+.brand { display: flex; align-items: center; gap: 10px; font-weight: 650; letter-spacing: -.01em; white-space: nowrap; }
+.mark { width: 24px; height: 24px; border-radius: 6px; background: var(--text); color: var(--surface); display: grid; place-items: center; }
+nav { display: flex; gap: 4px; height: 100%; }
+nav a { display: flex; align-items: center; gap: 8px; padding: 0 12px; color: var(--muted); font-weight: 550; border-bottom: 2px solid transparent; margin-bottom: -1px; }
+nav a:hover { color: var(--text); text-decoration: none; }
+nav a[aria-current="page"] { color: var(--text); border-bottom-color: var(--accent); }
+.count { min-width: 20px; padding: 0 6px; border-radius: 10px; background: var(--sunken); color: var(--muted); font-size: 12px; line-height: 20px; text-align: center; font-variant-numeric: tabular-nums; }
+.count.bad { background: var(--bad-soft); color: var(--bad); }
+.status { margin-left: auto; display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: 13px; white-space: nowrap; }
+.dot { width: 8px; height: 8px; border-radius: 50%; background: var(--ok); }
+.dot.off { background: var(--bad); }
+
+main { max-width: 1320px; margin: 0 auto; padding: 24px; }
+.toolbar { display: flex; align-items: flex-end; gap: 16px; margin-bottom: 16px; flex-wrap: wrap; }
+.toolbar h1 { margin: 0; font-size: 20px; font-weight: 650; letter-spacing: -.01em; }
+.toolbar .sub { color: var(--muted); font-size: 13px; margin-top: 2px; overflow-wrap: anywhere; }
+.toolbar .right { margin-left: auto; display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+
+/* Controls */
+.btn { display: inline-flex; align-items: center; justify-content: center; gap: 6px; height: 32px; padding: 0 12px; border-radius: 6px; border: 1px solid var(--border-strong); background: var(--surface); color: var(--text); font: inherit; font-weight: 550; cursor: pointer; white-space: nowrap; }
+.btn:hover { background: var(--sunken); }
+.btn:disabled { opacity: .5; cursor: not-allowed; }
+.btn.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-text); }
+.btn.primary:hover { filter: brightness(1.08); }
+.btn.ghost { border-color: transparent; background: transparent; color: var(--muted); }
+.btn.ghost:hover { background: var(--sunken); color: var(--text); }
+.btn.danger { color: var(--bad); }
+.btn.danger:hover { background: var(--bad-soft); color: var(--bad); }
+.btn.icon { width: 32px; padding: 0; }
+.btn svg, .mark svg { width: 16px; height: 16px; flex: none; }
+.input, select.input { height: 32px; padding: 0 10px; border-radius: 6px; border: 1px solid var(--border-strong); background: var(--surface); color: var(--text); font: inherit; min-width: 0; }
+.input.mono { font-size: 12.5px; }
+.input:focus { outline: 2px solid var(--accent); outline-offset: -1px; border-color: var(--accent); }
+.seg { display: inline-flex; border: 1px solid var(--border-strong); border-radius: 6px; overflow: hidden; }
+.seg button { height: 30px; padding: 0 12px; border: 0; background: var(--surface); color: var(--muted); font: inherit; font-weight: 550; cursor: pointer; }
+.seg button + button { border-left: 1px solid var(--border-strong); }
+.seg button[aria-pressed="true"] { background: var(--sunken); color: var(--text); }
+.check { display: inline-flex; align-items: center; gap: 6px; color: var(--muted); font-size: 13px; cursor: pointer; }
+
+.tag { display: inline-flex; align-items: center; height: 22px; padding: 0 8px; border-radius: 11px; background: var(--sunken); color: var(--muted); font-size: 12px; font-weight: 550; white-space: nowrap; }
+.tag.accent { background: var(--accent-soft); color: var(--accent); }
+.tag.warn { background: var(--warn-soft); color: var(--warn); }
+.pill { display: inline-flex; align-items: center; gap: 4px; height: 22px; padding: 0 8px; border-radius: 4px; font-size: 12px; font-weight: 700; letter-spacing: .02em; white-space: nowrap; }
+.pill svg { width: 12px; height: 12px; }
+.pill.ok { background: var(--ok-soft); color: var(--ok); }
+.pill.bad { background: var(--bad-soft); color: var(--bad); }
+.pill.none { background: var(--sunken); color: var(--muted); }
+.pill.run { background: var(--accent-soft); color: var(--accent); }
+.spin { width: 8px; height: 8px; border-radius: 50%; background: currentColor; animation: pulse 1s ease-in-out infinite; }
+@keyframes pulse { 50% { opacity: .25; } }
+.progress { flex-basis: 100%; height: 4px; border-radius: 2px; background: var(--sunken); overflow: hidden; }
+.progress i { display: block; height: 100%; background: var(--accent); transition: width .3s; }
+.lastrun .now { flex-basis: 100%; color: var(--accent); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+.panel { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); box-shadow: var(--shadow); }
+.empty { padding: 56px 24px; text-align: center; color: var(--muted); }
+.empty h2 { margin: 0 0 6px; color: var(--text); font-size: 16px; }
+.empty p { margin: 0 auto 16px; max-width: 460px; }
+
+/* Open session form */
+.open-form { padding: 16px; margin-bottom: 16px; display: grid; grid-template-columns: minmax(140px, 1fr) minmax(200px, 2fr) auto auto auto; gap: 12px; align-items: end; }
+.field { display: grid; gap: 4px; font-size: 12px; font-weight: 600; color: var(--muted); }
+.open-form .acts { display: flex; gap: 8px; }
+
+/* Session cards */
+.sessions { display: grid; grid-template-columns: repeat(auto-fill, minmax(600px, 1fr)); gap: 16px; }
+.card { display: grid; grid-template-columns: 220px 1fr; overflow: hidden; }
+.thumb { position: relative; display: block; padding: 0; border: 0; border-right: 1px solid var(--border); background: var(--sunken); cursor: zoom-in; min-height: 190px; }
+.thumb img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; object-position: top center; }
+.thumb .noshot { position: absolute; inset: 0; display: grid; place-items: center; color: var(--faint); font-size: 13px; }
+.thumb .live { position: absolute; left: 8px; bottom: 8px; display: inline-flex; align-items: center; gap: 6px; padding: 2px 8px; border-radius: 4px; background: rgba(0, 0, 0, .65); color: #fff; font-size: 11px; font-weight: 600; }
+.thumb .live::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: #3fdc6c; }
+.body { padding: 14px 16px 12px; display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+.head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.name { margin: 0 4px 0 0; font-size: 15px; font-weight: 650; }
+.tags { display: flex; gap: 6px; flex-wrap: wrap; }
+.page { min-width: 0; }
+.page .title { font-weight: 550; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.page .url { display: block; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.tabs { display: flex; gap: 6px; flex-wrap: wrap; }
+.tabs button { max-width: 200px; height: 26px; padding: 0 8px; border-radius: 4px; border: 1px solid var(--border); background: var(--surface); color: var(--muted); font: inherit; font-size: 12px; cursor: pointer; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.tabs button[aria-current="true"] { border-color: var(--accent); color: var(--accent); }
+.lastrun { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font-size: 13px; }
+.lastrun .err { flex-basis: 100%; color: var(--bad); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.stats { display: flex; gap: 16px; font-size: 13px; color: var(--muted); }
+.stats b { color: var(--text); font-weight: 600; font-variant-numeric: tabular-nums; }
+.stats b.bad { color: var(--bad); }
+.foot { margin-top: auto; padding-top: 10px; border-top: 1px solid var(--border); display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.go { display: flex; gap: 6px; flex: 1 1 100%; min-width: 0; }
+.go .input { flex: 1; }
+.actions { display: flex; gap: 2px; align-items: center; flex-wrap: wrap; width: 100%; }
+.actions .grow { flex: 1; }
+.actions .btn:not(.icon) { padding: 0 8px; }
+
+/* Runs */
+.runs { display: grid; gap: 8px; }
+.run { overflow: hidden; }
+.run.failed { border-left: 3px solid var(--bad); }
+.run-head { width: 100%; display: grid; grid-template-columns: 96px minmax(160px, 1.2fr) minmax(120px, 2fr) 80px 70px 120px 20px; gap: 16px; align-items: center; padding: 12px 16px; border: 0; background: none; color: inherit; font: inherit; text-align: left; cursor: pointer; }
+.run-head:hover { background: var(--sunken); }
+.run-name { min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.strip { display: flex; gap: 2px; flex-wrap: wrap; }
+.strip i { width: 10px; height: 10px; border-radius: 2px; background: var(--ok); opacity: .75; }
+.strip i.bad { background: var(--bad); opacity: 1; }
+.strip i.todo { background: var(--border-strong); opacity: 1; }
+.strip i.now { background: var(--accent); opacity: 1; animation: pulse 1s ease-in-out infinite; }
+.run.running { border-left: 3px solid var(--accent); }
+.chev { width: 16px; height: 16px; color: var(--faint); transition: transform .15s; }
+.run-head[aria-expanded="true"] .chev { transform: rotate(90deg); }
+.run-err { padding: 0 16px 12px 128px; margin-top: -4px; color: var(--bad); font-size: 13px; overflow-wrap: anywhere; }
+.run-detail { border-top: 1px solid var(--border); padding: 16px; background: var(--bg); }
+.run-detail .links { display: flex; gap: 8px; margin-bottom: 12px; }
+.steps { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 12px; align-items: start; }
+.step { margin: 0; background: var(--surface); border: 1px solid var(--border); border-radius: 6px; overflow: hidden; display: flex; flex-direction: column; }
+.step.bad { border-color: var(--bad); }
+.step .shot { aspect-ratio: 16 / 10; padding: 0; border: 0; border-bottom: 1px solid var(--border); background: var(--sunken); cursor: zoom-in; display: block; width: 100%; }
+.step .shot img { width: 100%; height: 100%; object-fit: cover; object-position: top left; display: block; }
+.step .noshot { aspect-ratio: 16 / 10; display: grid; place-items: center; color: var(--faint); font-size: 12px; background: var(--sunken); border-bottom: 1px solid var(--border); }
+.step figcaption { padding: 8px 10px; display: grid; gap: 4px; font-size: 13px; }
+.step .lbl { font-weight: 550; overflow-wrap: anywhere; }
+.step .meta { display: flex; gap: 8px; align-items: center; color: var(--muted); font-size: 12px; }
+.step .error { color: var(--bad); font-size: 12px; white-space: pre-wrap; overflow-wrap: anywhere; max-height: 7.5em; overflow: auto; }
+
+/* Files */
+.files { display: grid; grid-template-columns: 320px 1fr; gap: 16px; align-items: start; }
+.folders { overflow: hidden; position: sticky; top: 72px; max-height: calc(100vh - 96px); overflow-y: auto; }
+.folder { width: 100%; display: grid; gap: 2px; padding: 10px 14px; border: 0; border-bottom: 1px solid var(--border); background: none; color: inherit; font: inherit; text-align: left; cursor: pointer; }
+.folder:last-child { border-bottom: 0; }
+.folder:hover { background: var(--sunken); }
+.folder[aria-current="true"] { background: var(--accent-soft); box-shadow: inset 3px 0 var(--accent); }
+.folder .row { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.folder .fname { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.folder .row .tag { margin-left: auto; }
+.folder .fmeta { color: var(--muted); font-size: 12px; }
+.content { min-height: 300px; }
+.content-head { display: flex; align-items: center; gap: 12px; padding: 14px 16px; border-bottom: 1px solid var(--border); flex-wrap: wrap; }
+.content-head h2 { margin: 0; font-size: 15px; font-weight: 650; overflow-wrap: anywhere; }
+.content-head .right { margin-left: auto; display: flex; gap: 6px; }
+.group { padding: 14px 16px; }
+.group + .group { border-top: 1px solid var(--border); }
+.group h3 { margin: 0 0 10px; font-size: 12px; font-weight: 650; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
+.grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(170px, 1fr)); gap: 10px; }
+.tile { margin: 0; border: 1px solid var(--border); border-radius: 6px; overflow: hidden; background: var(--surface); }
+.tile.bad { border-color: var(--bad); }
+.tile button { display: block; width: 100%; aspect-ratio: 16 / 10; padding: 0; border: 0; background: var(--sunken); cursor: zoom-in; }
+.tile img { width: 100%; height: 100%; object-fit: cover; object-position: top left; display: block; }
+.tile figcaption { padding: 6px 8px; font-size: 12px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.rows { display: grid; }
+.frow { display: grid; grid-template-columns: 72px 1fr 80px 130px auto; gap: 12px; align-items: center; padding: 6px 0; border-bottom: 1px solid var(--border); font-size: 13px; }
+.frow:last-child { border-bottom: 0; }
+.frow .fn { min-width: 0; overflow-wrap: anywhere; }
+.frow .acts { display: flex; gap: 2px; }
+
+/* Viewer */
+dialog { padding: 0; border: 0; border-radius: var(--radius); background: var(--surface); color: var(--text); width: min(1280px, 94vw); max-height: 94vh; box-shadow: 0 20px 60px rgba(0, 0, 0, .35); }
+dialog::backdrop { background: rgba(10, 12, 16, .72); }
+.vhead { display: flex; align-items: center; gap: 8px; padding: 10px 12px 10px 16px; border-bottom: 1px solid var(--border); }
+.vhead .vt { font-weight: 600; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.vhead .right { margin-left: auto; display: flex; gap: 4px; align-items: center; }
+.vbody { background: var(--sunken); display: grid; place-items: center; max-height: calc(94vh - 53px); overflow: auto; }
+.vbody img, .vbody video { max-width: 100%; max-height: calc(94vh - 53px); display: block; }
+.vbody iframe { width: 100%; height: calc(94vh - 53px); border: 0; background: #fff; }
+
+.toast { position: fixed; right: 20px; bottom: 20px; z-index: 50; max-width: 420px; padding: 10px 14px; border-radius: 6px; background: var(--text); color: var(--surface); box-shadow: 0 6px 24px rgba(0, 0, 0, .2); font-size: 13px; }
+.toast.bad { background: var(--bad); color: #fff; }
+
+@media (max-width: 900px) {
+  .bar { gap: 12px; padding: 0 12px; }
+  .brand span { display: none; }
+  main { padding: 16px 12px; }
+  .sessions { grid-template-columns: 1fr; }
+  .card { grid-template-columns: 1fr; }
+  .thumb { border-right: 0; border-bottom: 1px solid var(--border); aspect-ratio: 16 / 9; min-height: 0; }
+  .open-form { grid-template-columns: 1fr; }
+  .run-head { grid-template-columns: 96px 1fr auto 20px; }
+  .run-head .hide-sm { display: none; }
+  .run-err { padding-left: 16px; }
+  .files { grid-template-columns: 1fr; }
+  .folders { position: static; max-height: 260px; }
+  .frow { grid-template-columns: 60px 1fr auto; }
+  .frow .hide-sm { display: none; }
 }
+@media (prefers-reduced-motion: reduce) { * { transition: none !important; animation: none !important; } }
 </style>
 </head>
 <body>
-<header><div class="hwrap">
-  <div class="brand"><div class="logo"><span data-icon="globe"></span></div>Simple Browser</div>
-  <div class="seg" id="seg">
-    <button data-tab="sessions" class="on"><span data-icon="window"></span>Session<span class="count" id="cSessions">0</span></button>
-    <button data-tab="assets"><span data-icon="images"></span>Assets</button>
+<header>
+  <div class="bar">
+    <div class="brand">
+      <div class="mark" aria-hidden="true"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M5 3v15.5l4-3.6 2.7 5.9 2.7-1.2-2.7-5.8H17z"/></svg></div>
+      <span>Simple Browser</span>
+    </div>
+    <nav aria-label="Mục chính">
+      <a href="#sessions" data-view="sessions">Session <span class="count" id="n-sessions">0</span></a>
+      <a href="#runs" data-view="runs">Lịch sử chạy <span class="count" id="n-runs">0</span></a>
+      <a href="#files" data-view="files">File</a>
+    </nav>
+    <div class="status" aria-live="polite"><span class="dot" id="dot"></span><span id="status">Đang tải</span></div>
   </div>
-  <div class="spacer"></div>
-  <div class="status"><span class="dot" id="dot"></span><span id="status">Đang kết nối…</span></div>
-</div></header>
+</header>
+
 <main>
-  <section id="sessions">
-    <form class="panel toolbar" id="openForm" autocomplete="off">
-      <label class="field"><span>Tên session</span><input name="id" placeholder="vd: alice" required pattern="[A-Za-z0-9._\\-]{1,64}"></label>
-      <label class="field wide"><span>URL mở đầu</span><input name="url" placeholder="https://… (tuỳ chọn)"></label>
-      <label class="field"><span>Chế độ</span><select name="headless"><option value="">Mặc định</option><option value="true">Headless</option><option value="false">Có cửa sổ</option></select></label>
-      <label class="field"><span>Cô lập</span><select name="isolation"><option value="browser">Process riêng</option><option value="context">Chung process</option></select></label>
-      <button class="btn primary lg" id="openBtn"><span data-icon="plus"></span>Mở session</button>
+  <section id="view-sessions" hidden>
+    <div class="toolbar">
+      <div>
+        <h1>Session</h1>
+        <div class="sub" id="session-meta"></div>
+      </div>
+      <div class="right">
+        <button class="btn primary" type="button" id="open-toggle" aria-expanded="false" aria-controls="open-form">Mở session</button>
+      </div>
+    </div>
+    <form class="panel open-form" id="open-form" hidden>
+      <label class="field">Tên session
+        <input class="input" name="id" required pattern="[A-Za-z0-9._\-]{1,64}" placeholder="vd: alice" autocomplete="off">
+      </label>
+      <label class="field">Mở sẵn URL (không bắt buộc)
+        <input class="input mono" name="url" placeholder="https://example.com" autocomplete="off">
+      </label>
+      <label class="field">Cách ly
+        <select class="input" name="isolation">
+          <option value="browser">Trình duyệt riêng</option>
+          <option value="context">Context trong trình duyệt chung</option>
+        </select>
+      </label>
+      <label class="field">Hiển thị
+        <select class="input" name="headless">
+          <option value="">Theo mặc định</option>
+          <option value="true">Headless</option>
+          <option value="false">Có cửa sổ</option>
+        </select>
+      </label>
+      <div class="acts">
+        <button class="btn primary" type="submit">Mở</button>
+        <button class="btn ghost" type="button" id="open-cancel">Huỷ</button>
+      </div>
     </form>
-    <div class="sechead">
-      <h2>Session đang mở</h2>
-      <div class="spacer"></div>
-      <label class="switch"><input type="checkbox" id="live" checked>Ảnh trực tiếp</label>
+    <div class="sessions" id="session-list"></div>
+    <div class="panel empty" id="session-empty" hidden>
+      <h2>Chưa có session nào đang mở</h2>
+      <p>Session do agent mở, ở bất kỳ instance nào, sẽ hiện ở đây kèm ảnh trực tiếp của trang.</p>
+      <button class="btn" type="button" id="open-empty">Mở session thủ công</button>
     </div>
-    <div id="sessionList" class="grid"></div>
   </section>
-  <section id="assets" hidden>
-    <div class="panel filters">
-      <select id="kind"><option value="">Mọi loại</option><option value="image">Ảnh</option><option value="video">Video</option><option value="report">Báo cáo</option><option value="trace">Trace</option><option value="har">HAR</option><option value="pdf">PDF</option><option value="other">Khác</option></select>
-      <div class="inputwrap"><span data-icon="search"></span><input id="filter" placeholder="Lọc theo tên file"></div>
-      <label class="switch"><input type="checkbox" id="failedOnly">Chỉ bước lỗi</label>
-      <div class="spacer"></div>
-      <span class="muted" id="rootInfo" style="font-size:12.5px"></span>
-      <button class="btn danger" id="prune"><span data-icon="broom"></span>Dọn thư mục cũ</button>
+
+  <section id="view-runs" hidden>
+    <div class="toolbar">
+      <div>
+        <h1>Lịch sử chạy</h1>
+        <div class="sub" id="runs-meta"></div>
+      </div>
+      <div class="right">
+        <div class="seg" role="group" aria-label="Lọc theo kết quả" id="run-filter">
+          <button type="button" data-v="all" aria-pressed="true">Tất cả</button>
+          <button type="button" data-v="bad" aria-pressed="false">Lỗi</button>
+          <button type="button" data-v="ok" aria-pressed="false">Đạt</button>
+        </div>
+        <select class="input" id="run-session" aria-label="Lọc theo session"></select>
+      </div>
     </div>
-    <div class="layout">
-      <div class="panel folders" id="folderList"></div>
-      <div id="fileList"></div>
+    <div class="runs" id="run-list"></div>
+    <div class="panel empty" id="runs-empty" hidden>
+      <h2>Chưa có lần chạy nào</h2>
+      <p>Mỗi lần agent gọi browser_run_flow sẽ được ghi lại ở đây, kèm ảnh từng bước và bước gây lỗi.</p>
+    </div>
+  </section>
+
+  <section id="view-files" hidden>
+    <div class="toolbar">
+      <div>
+        <h1>File</h1>
+        <div class="sub mono" id="files-meta"></div>
+      </div>
+      <div class="right">
+        <label class="check"><input type="checkbox" id="show-empty"> Hiện thư mục rỗng</label>
+        <select class="input" id="prune-days" aria-label="Phạm vi dọn dẹp">
+          <option value="7">Cũ hơn 7 ngày</option>
+          <option value="1">Cũ hơn 1 ngày</option>
+          <option value="30">Cũ hơn 30 ngày</option>
+          <option value="0">Mọi thư mục không còn mở</option>
+        </select>
+        <button class="btn" type="button" id="prune">Dọn dẹp</button>
+      </div>
+    </div>
+    <div class="files">
+      <div class="panel folders" id="folder-list" role="list"></div>
+      <div class="panel content" id="folder-content"></div>
     </div>
   </section>
 </main>
-<div id="viewer"><div class="top"><span id="vName"></span><a class="btn" id="vOpen" target="_blank"><span data-icon="external"></span>Tab mới</a><a class="btn" id="vDl"><span data-icon="download"></span>Tải về</a><button class="btn icon" id="vClose" title="Đóng (Esc)"><span data-icon="x"></span></button></div><div class="stage" id="vStage"></div></div>
-<div id="toast"></div>
+
+<dialog id="viewer" aria-label="Xem file">
+  <div class="vhead">
+    <div class="vt" id="v-title"></div>
+    <span class="muted num" id="v-count"></span>
+    <div class="right">
+      <button class="btn icon ghost" type="button" id="v-prev" aria-label="Ảnh trước"></button>
+      <button class="btn icon ghost" type="button" id="v-next" aria-label="Ảnh sau"></button>
+      <a class="btn ghost" id="v-open" target="_blank" rel="noreferrer">Mở tab mới</a>
+      <button class="btn icon ghost" type="button" id="v-close" aria-label="Đóng"></button>
+    </div>
+  </div>
+  <div class="vbody" id="v-body"></div>
+</dialog>
+
+<div class="toast" id="toast" role="status" hidden></div>
+
 <script>
-var state = { tab: "sessions", folder: null, assets: null, sessions: null, shots: {} };
-var $ = function (id) { return document.getElementById(id); };
-
-// Lucide-style 24px stroke icons.
-var PATHS = {
-  globe: '<circle cx="12" cy="12" r="10"/><path d="M2 12h20M12 2a15 15 0 0 1 0 20M12 2a15 15 0 0 0 0 20"/>',
-  window: '<rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 9h18"/>',
-  images: '<rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="9" cy="9" r="2"/><path d="m21 15-3.1-3.1a2 2 0 0 0-2.8 0L6 21"/>',
-  plus: '<path d="M12 5v14M5 12h14"/>',
-  search: '<circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/>',
-  back: '<path d="m12 19-7-7 7-7M19 12H5"/>',
-  reload: '<path d="M21 12a9 9 0 1 1-2.6-6.4L21 8"/><path d="M21 3v5h-5"/>',
-  report: '<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6M8 13h8M8 17h5"/>',
-  folder: '<path d="M4 20h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.7-.9l-.8-1.2A2 2 0 0 0 7.9 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2z"/>',
-  x: '<path d="M18 6 6 18M6 6l12 12"/>',
-  star: '<path d="m12 2 3.1 6.3 6.9 1-5 4.9 1.2 6.8L12 17.8 5.8 21l1.2-6.8-5-4.9 6.9-1z"/>',
-  external: '<path d="M15 3h6v6M10 14 21 3M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/>',
-  download: '<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12 15V3"/>',
-  copy: '<rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>',
-  trash: '<path d="M3 6h18M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6M10 11v6M14 11v6M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/>',
-  broom: '<path d="m19 2-8.5 8.5M14 13l-4-4-6.5 6.5a2 2 0 0 0 0 2.8l1.2 1.2a2 2 0 0 0 2.8 0z"/><path d="m9 18 3 3M6 15l-1 1"/>',
-  lock: '<rect x="4" y="11" width="16" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/>',
-  film: '<rect x="2" y="3" width="20" height="18" rx="2"/><path d="M7 3v18M17 3v18M2 8h5M2 16h5M17 8h5M17 16h5"/>',
-  route: '<circle cx="6" cy="19" r="3"/><circle cx="18" cy="5" r="3"/><path d="M9 19h8.5a3.5 3.5 0 0 0 0-7h-11a3.5 3.5 0 0 1 0-7H15"/>',
-  net: '<path d="M2 12h4l3-9 6 18 3-9h4"/>',
-  pdf: '<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/>',
-  box: '<path d="M21 8 12 3 3 8v8l9 5 9-5z"/><path d="m3 8 9 5 9-5M12 13v8"/>',
-  zoom: '<circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5M11 8v6M8 11h6"/>',
-  check: '<path d="M20 6 9 17l-5-5"/>',
-  alert: '<circle cx="12" cy="12" r="10"/><path d="M12 8v4M12 16h.01"/>'
+const ICONS = {
+  back: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 18l-6-6 6-6"/></svg>',
+  next: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18l6-6-6-6"/></svg>',
+  reload: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-2.6-6.4"/><path d="M21 3v6h-6"/></svg>',
+  close: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg>',
+  check: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12l5 5 9-10"/></svg>',
+  cross: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg>',
+  download: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4v11M7 10l5 5 5-5M5 20h14"/></svg>',
+  trash: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h16M9 7V4h6v3M6 7l1 13h10l1-13"/></svg>',
+  open: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 4h6v6M20 4l-9 9M18 14v6H4V6h6"/></svg>',
 };
-function icon(name) {
-  var s = document.createElementNS("http://www.w3.org/2000/svg", "svg");
-  s.setAttribute("viewBox", "0 0 24 24");
-  s.setAttribute("class", "i");
-  s.innerHTML = PATHS[name] || "";
-  return s;
-}
-document.querySelectorAll("[data-icon]").forEach(function (el) { el.replaceWith(icon(el.dataset.icon)); });
 
-function h(tag, attrs) {
-  var el = document.createElement(tag);
-  for (var k in attrs || {}) {
-    var v = attrs[k];
+const $ = (s, r) => (r || document).querySelector(s);
+const $$ = (s, r) => Array.from((r || document).querySelectorAll(s));
+
+function h(tag, attrs, kids) {
+  const el = document.createElement(tag);
+  for (const k in attrs || {}) {
+    const v = attrs[k];
     if (v == null || v === false) continue;
-    if (k === "text") el.textContent = v;
-    else if (k.slice(0, 2) === "on") el.addEventListener(k.slice(2), v);
+    if (k === "class") el.className = v;
+    else if (k === "text") el.textContent = v;
+    else if (k === "html") el.innerHTML = v;
+    else if (k.startsWith("on")) el.addEventListener(k.slice(2), v);
     else el.setAttribute(k, v === true ? "" : v);
   }
-  for (var i = 2; i < arguments.length; i++) {
-    var c = arguments[i];
-    if (c == null || c === false) continue;
-    if (Array.isArray(c)) c.forEach(function (x) { if (x) el.append(x); });
-    else el.append(c);
-  }
+  for (const c of kids || []) if (c != null && c !== false) el.append(c.nodeType ? c : String(c));
   return el;
 }
-function btn(cls, ic, label, onclick, extra) {
-  var b = h("button", Object.assign({ class: "btn " + cls, type: "button", onclick: onclick, title: label && cls.indexOf("icon") >= 0 ? label : null }, extra || {}),
-    ic ? icon(ic) : null, label && cls.indexOf("icon") < 0 ? label : null);
-  if (cls.indexOf("icon") >= 0) b.setAttribute("aria-label", label);
-  return b;
+
+function iconBtn(icon, label, onclick, cls) {
+  return h("button", { class: "btn icon ghost " + (cls || ""), type: "button", "aria-label": label, title: label, html: ICONS[icon], onclick });
 }
 
-function toast(msg, err) {
-  var t = $("toast");
-  t.textContent = "";
-  t.append(icon(err ? "alert" : "check"), msg);
-  t.className = "on" + (err ? " err" : "");
-  clearTimeout(toast.timer);
-  toast.timer = setTimeout(function () { t.className = ""; }, err ? 5000 : 2200);
+function pill(run) {
+  if (run.running) return h("span", { class: "pill run" }, [h("i", { class: "spin", "aria-hidden": "true" }), "ĐANG CHẠY"]);
+  if (!run.done) return h("span", { class: "pill none", text: "TRỐNG" });
+  return run.failed
+    ? h("span", { class: "pill bad", html: ICONS.cross }, ["LỖI"])
+    : h("span", { class: "pill ok", html: ICONS.check }, ["ĐẠT"]);
 }
 
-function api(path, body) {
-  var opts = body === undefined ? {} : { method: "POST", headers: { "content-type": "application/json", "x-mcp-ui": "1" }, body: JSON.stringify(body) };
-  return fetch(path, opts).then(function (r) {
-    return r.json().then(function (j) {
-      if (!r.ok) throw new Error(j.error || r.statusText);
-      return j;
-    });
-  });
+async function api(path, body) {
+  const init = body === undefined ? {} : {
+    method: "POST",
+    headers: { "content-type": "application/json", "x-mcp-ui": "1" },
+    body: JSON.stringify(body),
+  };
+  const res = await fetch(path, init);
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error || res.statusText);
+  return data;
 }
 
+const enc = encodeURIComponent;
+const fileUrl = (rel) => "/files/" + rel.split("/").map(enc).join("/");
+const extUrl = (path) => "/external?p=" + enc(path);
+const firstLine = (s) => String(s || "").split("\n")[0];
+
+function ago(t) {
+  const s = (Date.now() - t) / 1000;
+  if (s < 45) return "vừa xong";
+  if (s < 3600) return Math.round(s / 60) + " phút trước";
+  if (s < 86400) return Math.round(s / 3600) + " giờ trước";
+  return new Date(t).toLocaleString("vi-VN", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" });
+}
+const fullTime = (t) => new Date(t).toLocaleString("vi-VN");
+const dur = (ms) => ms < 1000 ? ms + " ms" : (ms / 1000).toFixed(1) + " s";
 function size(n) {
   if (n < 1024) return n + " B";
-  if (n < 1048576) return (n / 1024).toFixed(1) + " KB";
+  if (n < 1048576) return (n / 1024).toFixed(0) + " KB";
   if (n < 1073741824) return (n / 1048576).toFixed(1) + " MB";
   return (n / 1073741824).toFixed(2) + " GB";
 }
-function ago(t) {
-  var s = Math.round((Date.now() - t) / 1000);
-  if (s < 60) return "vừa xong";
-  if (s < 3600) return Math.round(s / 60) + " phút trước";
-  if (s < 86400) return Math.round(s / 3600) + " giờ trước";
-  return new Date(t).toLocaleDateString("vi-VN");
+function normalizeUrl(v) {
+  v = v.trim();
+  return /^[a-z][a-z0-9+.-]*:/i.test(v) ? v : "https://" + v;
 }
-function fileUrl(rel) { return "/files/" + rel.split("/").map(encodeURIComponent).join("/"); }
-function extUrl(p) { return "/external?p=" + encodeURIComponent(p); }
-function shortUrl(u) {
-  if (!u || u === "about:blank") return "about:blank";
-  if (/^data:/.test(u)) return "data:…";
-  return u.replace(/^https?:\\/\\//, "");
-}
-var KIND_ICON = { video: "film", report: "report", trace: "route", har: "net", pdf: "pdf", other: "box", image: "images" };
-var KIND_LABEL = { video: "Video", report: "Báo cáo", trace: "Trace", har: "HAR", pdf: "PDF", other: "File", image: "Ảnh" };
-
-// ---------- viewer ----------
-function view(name, src, kind) {
-  var stage = $("vStage");
-  stage.textContent = "";
-  $("vName").textContent = name;
-  $("vOpen").href = src;
-  $("vDl").href = src + (src.indexOf("?") < 0 ? "?" : "&") + "download";
-  if (kind === "image") stage.append(h("img", { src: src }));
-  else if (kind === "video") stage.append(h("video", { src: src, controls: true, autoplay: true }));
-  else if (kind === "trace") { location.href = $("vDl").href; return; }
-  else stage.append(h("iframe", { src: src }));
-  $("viewer").className = "on";
-}
-function closeViewer() { $("viewer").className = ""; $("vStage").textContent = ""; }
-$("vClose").onclick = closeViewer;
-$("viewer").addEventListener("click", function (e) { if (e.target.id === "vStage") closeViewer(); });
-document.addEventListener("keydown", function (e) { if (e.key === "Escape") closeViewer(); });
-
-// ---------- tabs ----------
-function showTab(name) {
-  state.tab = name;
-  document.querySelectorAll("#seg button").forEach(function (x) { x.classList.toggle("on", x.dataset.tab === name); });
-  $("sessions").hidden = name !== "sessions";
-  $("assets").hidden = name !== "assets";
-  history.replaceState(null, "", "#" + name);
-  refresh();
-}
-document.querySelectorAll("#seg button").forEach(function (b) { b.onclick = function () { showTab(b.dataset.tab); }; });
-
-// ---------- sessions ----------
-function act(id, action, body, label) {
-  return api("/api/sessions/" + encodeURIComponent(id) + "/" + action, body || {}).then(function (r) {
-    if (label) toast(label);
-    loadSessions();
-    return r;
-  }, function (e) { toast(e.message, true); });
-}
-function shotUrl(id) { return "/api/sessions/" + encodeURIComponent(id) + "/shot?t=" + Date.now(); }
-
-function sessionCard(s, active) {
-  var cur = s.tabs.filter(function (t) { return t.current; })[0] || s.tabs[0] || { url: s.url, title: "" };
-  var live = $("live").checked;
-  var shot = h("div", { class: "shotwrap", "data-id": s.id, onclick: function () { view(s.id + " · " + (cur.title || cur.url), shotUrl(s.id), "image"); } },
-    h("div", { class: "ph", text: live ? "Đang chụp…" : "Ảnh trực tiếp đang tắt" }),
-    live && state.shots[s.id] ? h("img", { src: state.shots[s.id], alt: "" }) : null,
-    h("div", { class: "zoom" }, icon("zoom"), "Phóng to"));
-  var urlInput = h("input", { placeholder: "Nhập URL rồi Enter", value: cur.url && !/^(about|data):/.test(cur.url) ? cur.url : "" });
-  var go = function () { if (urlInput.value) act(s.id, "navigate", { url: /^\\w+:/.test(urlInput.value) ? urlInput.value : "https://" + urlInput.value }, "Đã mở trang"); };
-  urlInput.addEventListener("keydown", function (e) { if (e.key === "Enter") go(); });
-  var isActive = s.id === active;
-  return h("div", { class: "card" + (isActive ? " active" : "") },
-    h("div", { class: "chrome" },
-      h("div", { class: "lights" }, h("i"), h("i"), h("i")),
-      h("div", { class: "addr", title: cur.url }, icon(/^https:/.test(cur.url) ? "lock" : "globe"), h("span", { text: shortUrl(cur.url) }))),
-    shot,
-    h("div", { class: "cbody" },
-      h("div", { class: "ctitle" },
-        h("b", { text: s.id }),
-        isActive ? h("span", { class: "badge accent", text: "Mặc định" }) : null,
-        h("span", { class: "badge", text: s.headless ? "Headless" : "Có cửa sổ" }),
-        h("span", { class: "badge", text: s.isolation === "context" ? "Chung process" : s.isolation === "cdp" ? "Chrome của bạn" : "Process riêng" }),
-        s.tracing ? h("span", { class: "badge rec", text: "Trace" }) : null,
-        s.video ? h("span", { class: "badge rec", text: "Video" }) : null,
-        s.har ? h("span", { class: "badge rec", text: "HAR" }) : null),
-      s.tabs.length ? h("div", { class: "tabs" }, s.tabs.map(function (t, i) {
-        return h("div", { class: "tab" + (t.current ? " cur" : ""), title: t.url, onclick: function () { if (!t.current) act(s.id, "tab", { index: i }); } },
-          h("span", { class: "n", text: String(i + 1) }),
-          t.title ? h("span", { class: "t", text: t.title }) : null,
-          h("span", { class: "u", text: shortUrl(t.url) }));
-      })) : null,
-      h("div", { class: "stats" },
-        h("span", { class: "badge", text: s.tabs.length + " tab" }),
-        h("span", { class: "badge", text: s.requests + " request" }),
-        s.failedRequests ? h("span", { class: "badge fail", text: s.failedRequests + " request lỗi" }) : null,
-        s.consoleErrors ? h("span", { class: "badge fail", text: s.consoleErrors + " lỗi console" }) : null,
-        !s.failedRequests && !s.consoleErrors ? h("span", { class: "badge ok", text: "Không có lỗi" }) : null),
-      h("div", { class: "go" },
-        h("div", { class: "inputwrap" }, icon("search"), urlInput),
-        h("button", { class: "btn primary lg", type: "button", onclick: go, text: "Mở" })),
-      h("div", { class: "actions" },
-        btn("icon", "back", "Lùi", function () { act(s.id, "back"); }),
-        btn("icon", "reload", "Tải lại", function () { act(s.id, "reload"); }),
-        btn("", "report", "Báo cáo", function () { act(s.id, "report").then(function (r) { if (r) view("report.html", fileUrl(r.report), "report"); }); }),
-        btn("", "folder", "Assets", function () { state.folder = s.evidenceFolder; showTab("assets"); }),
-        isActive ? null : btn("icon", "star", "Đặt làm session mặc định", function () { act(s.id, "use", {}, "Đã đặt " + s.id + " làm mặc định"); }),
-        h("div", { class: "spacer" }),
-        btn("danger icon", "x", "Đóng session", function () { if (confirm("Đóng session " + s.id + "?")) act(s.id, "close", {}, "Đã đóng " + s.id); })),
-      h("div", { class: "path", title: s.evidenceDir, text: s.evidenceDir })));
+// "alice-2026-11-10T08-30-00" -> session and when.
+function folderParts(name) {
+  const m = /^(.*)-(\d{4})-(\d{2})-(\d{2})T(\d{2})-(\d{2})-(\d{2})$/.exec(name);
+  if (!m) return { session: name, when: null };
+  return { session: m[1], when: new Date(m[2] + "-" + m[3] + "-" + m[4] + "T" + m[5] + ":" + m[6] + ":" + m[7] + "Z").getTime() };
 }
 
-function loadSessions() {
-  return api("/api/sessions").then(function (d) {
-    state.sessions = d;
-    var list = $("sessionList");
-    list.textContent = "";
-    if (!d.sessions.length) list.append(h("div", { class: "empty", style: "grid-column:1/-1" }, icon("window"),
-      h("div", { text: "Chưa có session nào. Session sẽ hiện ở đây khi agent dùng trình duyệt, hoặc mở một cái ở trên." })));
-    d.sessions.forEach(function (s) { list.append(sessionCard(s, d.active)); });
-    if ($("live").checked) d.sessions.forEach(function (s) { refreshShot(s.id); });
-    $("cSessions").textContent = d.sessions.length;
-    $("dot").className = "dot";
-    $("status").textContent = "Đã kết nối · mặc định " + (d.defaultHeadless ? "headless" : "có cửa sổ");
-  }, function (e) { $("dot").className = "dot off"; $("status").textContent = "Mất kết nối"; });
+let toastTimer;
+function toast(msg, bad) {
+  const el = $("#toast");
+  el.textContent = msg;
+  el.className = "toast" + (bad ? " bad" : "");
+  el.hidden = false;
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => { el.hidden = true; }, bad ? 6000 : 2500);
 }
 
-// Fetch the next frame off-screen and swap it in when ready, so the card keeps
-// showing the previous one instead of flashing empty every refresh.
-function refreshShot(id) {
-  fetch(shotUrl(id)).then(function (r) { if (!r.ok) throw 0; return r.blob(); }).then(function (blob) {
-    var old = state.shots[id];
-    var src = URL.createObjectURL(blob);
-    state.shots[id] = src;
-    var wrap = document.querySelector('.shotwrap[data-id="' + CSS.escape(id) + '"]');
-    if (wrap) {
-      var img = wrap.querySelector("img");
-      if (!img) { img = h("img", { alt: "" }); wrap.insertBefore(img, wrap.querySelector(".zoom")); }
-      img.src = src;
-    }
-    if (old) setTimeout(function () { URL.revokeObjectURL(old); }, 1000);
-  }).catch(function () {});
+function online(ok) {
+  $("#dot").className = "dot" + (ok ? "" : " off");
+  $("#status").textContent = !ok ? "Mất kết nối với server" : live ? "Đang theo dõi trực tiếp" : "Cập nhật " + new Date().toLocaleTimeString("vi-VN");
 }
 
-$("openForm").onsubmit = function (e) {
-  e.preventDefault();
-  var f = e.target, b = $("openBtn");
-  var body = { id: f.id.value.trim(), url: f.url.value.trim(), isolation: f.isolation.value };
-  if (body.url && !/^\\w+:/.test(body.url)) body.url = "https://" + body.url;
-  if (f.headless.value) body.headless = f.headless.value === "true";
-  b.disabled = true;
-  b.lastChild.textContent = "Đang mở…";
-  api("/api/sessions", body).then(function () { toast("Đã mở " + body.id); f.id.value = ""; f.url.value = ""; loadSessions(); },
-    function (err) { toast(err.message, true); }).then(function () { b.disabled = false; b.lastChild.textContent = "Mở session"; });
-};
-$("live").onchange = loadSessions;
+const state = { view: "", sessions: null, runs: null, runsKey: "", assets: null, folder: null, runFilter: "all", runSession: "", expanded: new Set() };
 
-// ---------- assets ----------
-function loadAssets() {
-  return api("/api/assets").then(function (d) {
-    state.assets = d;
-    $("rootInfo").textContent = d.root + " · " + size(d.folders.reduce(function (n, f) { return n + f.size; }, 0));
-    var list = $("folderList");
-    list.textContent = "";
-    if (d.external.length) list.append(folderRow({ name: "__external", label: "Lưu ngoài thư mục evidence", files: d.external.length, size: d.external.reduce(function (n, f) { return n + f.size; }, 0), mtime: d.external[0].mtime }));
-    d.folders.forEach(function (f) { list.append(folderRow(f)); });
-    if (!d.folders.length && !d.external.length) list.append(h("div", { class: "folder muted", text: "Chưa có thư mục nào" }));
-    var names = d.folders.map(function (f) { return f.name; });
-    if (state.folder !== "__external" && names.indexOf(state.folder) < 0) state.folder = names[0] || (d.external.length ? "__external" : null);
-    highlight();
-    return loadFiles();
-  }, function (e) { toast(e.message, true); });
-}
+/* ---------- Router ---------- */
 
-// Evidence folders are named <session>-<YYYY-MM-DD>T<HH-MM-SS>; show the
-// session as the title and the start time in the meta line.
-function splitFolder(name) {
-  var m = /^(.*)-(\\d{4})-(\\d{2})-(\\d{2})T(\\d{2})-(\\d{2})-(\\d{2})$/.exec(name);
-  return m ? { id: m[1], when: m[4] + "/" + m[3] + " " + m[5] + ":" + m[6] } : { id: name, when: "" };
-}
-function folderRow(f) {
-  var parts = f.label ? { id: f.label, when: "" } : splitFolder(f.name);
-  return h("div", { class: "folder", "data-name": f.name, title: f.name, onclick: function () { state.folder = f.name; highlight(); loadFiles(); } },
-    h("div", { class: "n" }, icon(f.name === "__external" ? "box" : "folder"), h("span", { text: parts.id }), f.session ? h("span", { class: "badge accent", text: "đang mở" }) : null),
-    h("div", { class: "m", text: (parts.when ? parts.when + " · " : "") + f.files + " file · " + size(f.size) }));
-}
-function highlight() {
-  document.querySelectorAll(".folder").forEach(function (el) { el.classList.toggle("sel", el.dataset.name === state.folder); });
-}
-
-function loadFiles() {
-  if (!state.folder) { renderFiles([]); return; }
-  if (state.folder === "__external") {
-    renderFiles(state.assets.external.map(function (f) { return Object.assign({ external: true, src: extUrl(f.path) }, f); }));
-    return;
+function route() {
+  const hash = location.hash.slice(1) || "sessions";
+  const [view, ...rest] = hash.split("/");
+  state.view = ["sessions", "runs", "files"].includes(view) ? view : "sessions";
+  for (const v of ["sessions", "runs", "files"]) $("#view-" + v).hidden = v !== state.view;
+  for (const a of $$("nav a")) {
+    if (a.dataset.view === state.view) a.setAttribute("aria-current", "page");
+    else a.removeAttribute("aria-current");
   }
-  return api("/api/assets/" + encodeURIComponent(state.folder)).then(function (d) {
-    renderFiles(d.files.map(function (f) { return Object.assign({ src: fileUrl(f.path) }, f); }));
-  }, function (e) { toast(e.message, true); });
-}
-
-function renderFiles(files) {
-  var box = $("fileList");
-  box.textContent = "";
-  var folder = state.assets && state.assets.folders.filter(function (f) { return f.name === state.folder; })[0];
-  if (folder) {
-    var failed = files.filter(function (f) { return /FAILED/.test(f.path); }).length;
-    box.append(h("div", { class: "fhead" },
-      h("h2", { text: folder.name }),
-      folder.session ? h("span", { class: "badge accent", text: "Session " + folder.session + " đang mở" }) : null,
-      failed ? h("span", { class: "badge fail", text: failed + " bước lỗi" }) : null,
-      h("div", { class: "spacer" }),
-      folder.hasReport ? btn("", "report", "Xem báo cáo", function () { view("report.html", fileUrl(folder.name + "/report.html"), "report"); }) : null,
-      btn("danger", "trash", "Xoá thư mục", function () { if (confirm("Xoá toàn bộ " + folder.name + "?")) del({ path: folder.name }); },
-        { disabled: !!folder.session, title: folder.session ? "Đóng session trước khi xoá" : null })));
-  }
-  var kind = $("kind").value, q = $("filter").value.toLowerCase(), failedOnly = $("failedOnly").checked;
-  var shown = files.filter(function (f) {
-    return (!kind || f.kind === kind) && (!q || f.path.toLowerCase().indexOf(q) >= 0) && (!failedOnly || /FAILED/.test(f.path));
-  });
-  if (!shown.length) {
-    box.append(h("div", { class: "empty" }, icon("images"), h("div", { text: files.length ? "Không có file khớp bộ lọc." : "Thư mục trống." })));
-    return;
-  }
-  // Group by sub folder (run-01, run-02, …) so a flow reads as one strip.
-  var groups = {};
-  shown.forEach(function (f) {
-    var rel = f.external ? f.path : f.path.split("/").slice(1).join("/");
-    var parts = rel.split("/");
-    var g = f.external ? "" : parts.length > 1 ? parts.slice(0, -1).join("/") : "";
-    (groups[g] = groups[g] || []).push(Object.assign({ name: f.external ? f.path : parts[parts.length - 1] }, f));
-  });
-  Object.keys(groups).sort().forEach(function (g) {
-    box.append(h("div", { class: "group" }, icon(g ? "route" : "folder"), g ? g + " · " + groups[g].length + " file" : "Tổng quan"));
-    box.append(h("div", { class: "files" }, groups[g].map(fileCard)));
-  });
-}
-
-function fileCard(f) {
-  var failed = /FAILED/.test(f.name);
-  var thumb = h("button", { class: "thumb", type: "button", title: "Xem", onclick: function () { view(f.path, f.src, f.kind); } },
-    f.kind === "image" ? h("img", { loading: "lazy", src: f.src, alt: "" }) : icon(KIND_ICON[f.kind] || "box"),
-    failed ? h("span", { class: "badge fail tag", text: "Lỗi" }) : f.kind !== "image" ? h("span", { class: "badge tag", text: KIND_LABEL[f.kind] }) : null);
-  var path = f.external ? f.path : state.assets.root + "/" + f.path;
-  return h("div", { class: "file" + (failed ? " fail" : "") }, thumb,
-    h("div", { class: "fmeta" },
-      h("div", { class: "fname", text: f.name }),
-      h("div", { class: "fsub" },
-        h("span", { text: size(f.size) + " · " + ago(f.mtime) }),
-        h("div", { class: "facts" },
-          h("a", { class: "btn ghost sm icon", href: f.src + (f.src.indexOf("?") < 0 ? "?" : "&") + "download", title: "Tải về", "aria-label": "Tải về" }, icon("download")),
-          btn("ghost sm icon", "copy", "Copy đường dẫn", function () {
-            navigator.clipboard.writeText(path).then(function () { toast("Đã copy đường dẫn"); }, function () { prompt("Đường dẫn", path); });
-          }),
-          btn("ghost sm icon danger", "trash", "Xoá", function () {
-            if (confirm("Xoá " + f.name + "?")) del(f.external ? { external: f.path } : { path: f.path });
-          }))),
-      f.kind === "trace" ? h("code", { class: "path", text: "npx playwright show-trace " + path }) : null));
-}
-
-function del(body) {
-  api("/api/assets/delete", body).then(function () { toast("Đã xoá"); loadAssets(); }, function (e) { toast(e.message, true); });
-}
-
-$("kind").onchange = $("filter").oninput = $("failedOnly").onchange = function () { loadFiles(); };
-$("prune").onclick = function () {
-  var days = prompt("Xoá thư mục evidence của các session đã đóng, cũ hơn bao nhiêu ngày? (0 = tất cả)", "7");
-  if (days === null) return;
-  api("/api/assets/prune", { olderThanDays: Number(days) || 0 }).then(function (r) {
-    toast("Đã xoá " + r.removed.length + " thư mục");
+  if (state.view === "sessions") loadSessions();
+  if (state.view === "runs") loadRuns();
+  if (state.view === "files") {
+    state.folder = rest.length ? decodeURIComponent(rest.join("/")) : null;
     loadAssets();
-  }, function (e) { toast(e.message, true); });
+  }
+}
+window.addEventListener("hashchange", route);
+const go = (hash) => { location.hash = hash; };
+
+/* ---------- Sessions ---------- */
+
+const cards = new Map();
+
+async function loadSessions() {
+  try {
+    state.sessions = await api("/api/sessions");
+    online(true);
+  } catch (e) {
+    online(false);
+    return;
+  }
+  renderSessions();
+}
+
+function renderSessions() {
+  const d = state.sessions;
+  $("#n-sessions").textContent = d.sessions.length;
+  $("#session-meta").textContent = "Mặc định mở " + (d.defaultHeadless ? "headless" : "có cửa sổ") + " · Evidence lưu ở " + d.evidenceRoot;
+  const list = $("#session-list");
+  const ids = new Set(d.sessions.map((s) => s.id));
+  for (const [id, c] of cards) if (!ids.has(id)) { c.el.remove(); cards.delete(id); }
+  d.sessions.forEach((s, i) => {
+    let c = cards.get(s.id);
+    if (!c) { c = buildCard(s.id); cards.set(s.id, c); }
+    if (list.children[i] !== c.el) list.insertBefore(c.el, list.children[i] || null);
+    updateCard(c, s, d.active);
+  });
+  $("#session-empty").hidden = d.sessions.length > 0;
+  refreshShots();
+}
+
+function buildCard(id) {
+  const c = { id, loading: false };
+  c.img = h("img", { alt: "" , hidden: true });
+  c.noshot = h("div", { class: "noshot", text: "Đang tải ảnh" });
+  c.thumb = h("button", { class: "thumb", type: "button", "aria-label": "Xem lớn trang của session " + id, onclick: () => openLive(id) },
+    [c.img, c.noshot, h("span", { class: "live", text: "Trực tiếp" })]);
+  c.name = h("h2", { class: "name", text: id });
+  c.tags = h("div", { class: "tags" });
+  c.title = h("div", { class: "title" });
+  c.url = h("a", { class: "url mono", target: "_blank", rel: "noreferrer" });
+  c.tabs = h("div", { class: "tabs", role: "group", "aria-label": "Các tab" });
+  c.run = h("div", { class: "lastrun" });
+  c.stats = h("div", { class: "stats" });
+  c.input = h("input", { class: "input mono", type: "text", placeholder: "Nhập URL rồi Enter", "aria-label": "Mở URL trong session " + id, autocomplete: "off" });
+  const form = h("form", { class: "go", onsubmit: (e) => {
+    e.preventDefault();
+    if (!c.input.value.trim()) return;
+    act(id, "navigate", { url: normalizeUrl(c.input.value) }).then((ok) => { if (ok) c.input.value = ""; });
+  } }, [c.input, h("button", { class: "btn", type: "submit", text: "Mở" })]);
+  c.useBtn = h("button", { class: "btn ghost", type: "button", text: "Mặc định", title: "Đặt làm session mặc định: tool không ghi session sẽ dùng session này", onclick: () => act(id, "use") });
+  const actions = h("div", { class: "actions" }, [
+    iconBtn("back", "Quay lại trang trước", () => act(id, "back")),
+    iconBtn("reload", "Tải lại trang", () => act(id, "reload")),
+    h("button", { class: "btn ghost", type: "button", text: "Báo cáo", onclick: () => makeReport(id) }),
+    h("button", { class: "btn ghost", type: "button", text: "File", onclick: () => go("files/" + enc(c.folder)) }),
+    h("span", { class: "grow" }),
+    c.useBtn,
+    h("button", { class: "btn ghost danger", type: "button", text: "Đóng", onclick: () => closeSessionUi(id) }),
+  ]);
+  c.el = h("article", { class: "panel card" }, [
+    c.thumb,
+    h("div", { class: "body" }, [
+      h("div", { class: "head" }, [c.name, c.tags]),
+      h("div", { class: "page" }, [c.title, c.url]),
+      c.tabs, c.run, c.stats,
+      h("div", { class: "foot" }, [form, actions]),
+    ]),
+  ]);
+  return c;
+}
+
+function tag(text, cls, title) {
+  return h("span", { class: "tag " + (cls || ""), text, title });
+}
+
+function updateCard(c, s, active) {
+  c.folder = s.evidenceFolder;
+  c.hasPage = s.tabs.length > 0;
+  const tags = [];
+  if (s.id === active) tags.push(tag("Mặc định", "accent", "Tool không ghi session sẽ dùng session này"));
+  if (s.isolation === "cdp") tags.push(tag("Chrome của bạn"));
+  else if (s.shared) tags.push(tag(s.instances > 1 ? "Dùng chung · " + s.instances + " instance" : "Dùng chung được", "", "Mọi instance MCP đều điều khiển được session này"));
+  else tags.push(tag("Riêng instance", "", "Chỉ instance đã mở mới điều khiển được"));
+  if (!s.here) tags.push(tag("Instance khác"));
+  if (s.isolation === "context") tags.push(tag("Context"));
+  tags.push(tag(s.headless ? "Headless" : "Có cửa sổ"));
+  if (s.tracing) tags.push(tag("Đang ghi trace", "warn"));
+  if (s.video) tags.push(tag("Quay video", "warn"));
+  c.tags.replaceChildren(...tags);
+  c.useBtn.hidden = s.id === active;
+
+  const cur = s.tabs.find((t) => t.current) || s.tabs[0];
+  c.title.textContent = cur ? (cur.title || "Không có tiêu đề") : "Không có tab nào";
+  c.url.textContent = cur ? cur.url : "";
+  c.url.href = cur && /^https?:/.test(cur.url) ? cur.url : "#";
+  c.url.title = cur ? cur.url : "";
+  if (s.tabs.length > 1) {
+    c.tabs.hidden = false;
+    c.tabs.replaceChildren(...s.tabs.map((t, i) => h("button", {
+      type: "button", "aria-current": String(t === cur), title: t.url,
+      text: (i + 1) + ". " + (t.title || t.url),
+      onclick: () => act(s.id, "tab", { index: i }),
+    })));
+  } else c.tabs.hidden = true;
+
+  const r = s.lastRun;
+  c.running = !!(r && r.running);
+  if (r && r.running) {
+    const at = r.current ? r.current.i : r.done;
+    c.run.replaceChildren(
+      pill(r),
+      h("span", { class: "num", text: r.id + " · bước " + (at + 1) + "/" + r.total + " · " + r.passed + " đạt" }),
+      h("a", { href: "#runs", text: "Xem", onclick: () => state.expanded.add(s.evidenceFolder + "/" + r.id) }),
+      r.current && h("div", { class: "now", title: r.current.label, text: "Đang làm: " + r.current.label }),
+      h("div", { class: "progress", role: "progressbar", "aria-valuemin": "0", "aria-valuemax": String(r.total), "aria-valuenow": String(r.done), "aria-label": "Tiến độ flow" },
+        [h("i", { style: "width:" + Math.round(100 * r.done / Math.max(1, r.total)) + "%" })]),
+    );
+  } else if (r) {
+    const parts = [pill(r), h("span", { text: r.id + " · " + r.passed + "/" + r.total + " bước đạt · " + ago(r.started), title: "Flow gần nhất, chạy lúc " + fullTime(r.started) }),
+      h("a", { href: "#runs", text: "Xem", onclick: () => state.expanded.add(s.evidenceFolder + "/" + r.id) })];
+    if (r.failed) parts.push(h("div", { class: "err", title: r.failed.error, text: "Bước " + r.failed.i + ": " + r.failed.label + " - " + firstLine(r.failed.error) }));
+    c.run.replaceChildren(...parts);
+  } else c.run.replaceChildren(h("span", { class: "muted", text: "Chưa chạy flow nào" }));
+
+  const stat = (label, n, bad) => h("span", {}, [label + " ", h("b", { class: bad ? "bad" : "", text: n == null ? "-" : String(n) })]);
+  c.stats.replaceChildren(
+    stat("Lỗi console", s.consoleErrors, s.consoleErrors > 0),
+    stat("Request lỗi", s.failedRequests, s.failedRequests > 0),
+    stat("Số flow", s.runs, false),
+  );
+}
+
+// A card whose flow is running refreshes about every 1.5 s, the rest every 4 s.
+const SHOT_IDLE_MS = 4000;
+const SHOT_BUSY_MS = 1500;
+
+function refreshShots() {
+  if (state.view !== "sessions" || document.hidden || viewer.open) return;
+  const now = Date.now();
+  for (const c of cards.values()) {
+    if (!c.hasPage) { c.img.hidden = true; c.noshot.hidden = false; c.noshot.textContent = "Chưa có trang"; continue; }
+    if (c.loading || now - (c.shotAt || 0) < (c.running ? SHOT_BUSY_MS : SHOT_IDLE_MS) - 100) continue;
+    c.loading = true;
+    c.shotAt = now;
+    const im = new Image();
+    im.onload = () => { c.img.src = im.src; c.img.hidden = false; c.noshot.hidden = true; c.loading = false; };
+    im.onerror = () => { if (c.img.hidden) c.noshot.textContent = "Không chụp được trang"; c.loading = false; };
+    im.src = "/api/sessions/" + enc(c.id) + "/shot?t=" + Date.now();
+  }
+}
+
+async function act(id, action, body) {
+  try {
+    await api("/api/sessions/" + enc(id) + "/" + action, body || {});
+    loadSessions();
+    return true;
+  } catch (e) {
+    toast(e.message, true);
+    return false;
+  }
+}
+
+async function makeReport(id) {
+  try {
+    const r = await api("/api/sessions/" + enc(id) + "/report", {});
+    if (r.report) window.open(fileUrl(r.report), "_blank", "noopener");
+  } catch (e) { toast(e.message, true); }
+}
+
+async function closeSessionUi(id) {
+  const s = state.sessions.sessions.find((x) => x.id === id);
+  const others = s && s.instances > 1 ? " Session đang được " + s.instances + " instance dùng; trình duyệt chỉ tắt khi instance cuối cùng nhả ra." : "";
+  if (!confirm("Đóng session \"" + id + "\"?" + others)) return;
+  if (await act(id, "close")) toast("Đã đóng session " + id);
+}
+
+function toggleOpenForm(show) {
+  const form = $("#open-form");
+  form.hidden = !show;
+  $("#open-toggle").setAttribute("aria-expanded", String(show));
+  if (show) form.elements.id.focus();
+}
+$("#open-toggle").onclick = () => toggleOpenForm($("#open-form").hidden);
+$("#open-empty").onclick = () => toggleOpenForm(true);
+$("#open-cancel").onclick = () => toggleOpenForm(false);
+$("#open-form").onsubmit = async (e) => {
+  e.preventDefault();
+  const f = e.target;
+  const btn = $("button[type=submit]", f);
+  const body = { id: f.elements.id.value.trim(), isolation: f.elements.isolation.value };
+  if (f.elements.url.value.trim()) body.url = normalizeUrl(f.elements.url.value);
+  if (f.elements.headless.value) body.headless = f.elements.headless.value === "true";
+  btn.disabled = true;
+  btn.textContent = "Đang mở";
+  try {
+    const r = await api("/api/sessions", body);
+    toast(r.attached ? "Đã nối vào session " + r.id + " của instance khác" : "Đã mở session " + r.id);
+    f.reset();
+    toggleOpenForm(false);
+    loadSessions();
+  } catch (err) {
+    toast(err.message, true);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = "Mở";
+  }
 };
 
-// ---------- loop ----------
-function refresh() { return state.tab === "sessions" ? loadSessions() : loadAssets(); }
-setInterval(function () {
-  if (document.hidden || state.tab !== "sessions" || $("viewer").className) return;
-  // Rebuilding the cards would wipe whatever is being typed into one.
-  if ($("sessionList").contains(document.activeElement)) return;
-  loadSessions();
-}, 4000);
-if (location.hash === "#assets") showTab("assets");
-else refresh();
+let liveTimer;
+function openLive(id) {
+  const img = h("img", { alt: "Trang hiện tại của session " + id });
+  const tick = () => { img.src = "/api/sessions/" + enc(id) + "/shot?t=" + Date.now(); };
+  tick();
+  showViewer({ title: id + " (trực tiếp, tự làm mới)", node: img, open: null });
+  liveTimer = setInterval(tick, 2000);
+}
+
+/* ---------- Runs ---------- */
+
+async function loadRuns() {
+  let data;
+  try {
+    data = await api("/api/runs");
+    online(true);
+  } catch (e) {
+    online(false);
+    return;
+  }
+  state.runs = data.runs;
+  updateRunCount();
+  // Re-rendering would collapse what the user is reading; only do it on change.
+  const key = JSON.stringify(data.runs.map((r) => [r.folder, r.id, r.done, r.passed, r.report, r.running, r.current && r.current.i]));
+  if (key === state.runsKey) return;
+  state.runsKey = key;
+  renderRuns();
+}
+
+function updateRunCount() {
+  const bad = state.runs.filter((r) => r.failed).length;
+  const n = $("#n-runs");
+  n.textContent = bad ? bad + " lỗi" : String(state.runs.length);
+  n.className = "count" + (bad ? " bad" : "");
+}
+
+function renderRuns() {
+  const runs = state.runs || [];
+  const sessions = [...new Set(runs.map((r) => r.session))].sort();
+  const sel = $("#run-session");
+  sel.replaceChildren(h("option", { value: "", text: "Mọi session" }), ...sessions.map((s) => h("option", { value: s, text: s })));
+  sel.value = sessions.includes(state.runSession) ? state.runSession : "";
+  const shown = runs.filter((r) =>
+    (!sel.value || r.session === sel.value) &&
+    (state.runFilter === "all" || (state.runFilter === "bad" ? !!r.failed : r.done && !r.failed && !r.running)));
+  const bad = runs.filter((r) => r.failed).length;
+  const running = runs.filter((r) => r.running).length;
+  $("#runs-meta").textContent = runs.length
+    ? runs.length + " lần chạy gần nhất · " + (running ? running + " đang chạy · " : "") + bad + " lỗi · " + (runs.length - bad - running) + " đạt hoặc trống"
+    : "";
+  $("#run-list").replaceChildren(...shown.map(runItem));
+  $("#runs-empty").hidden = runs.length > 0;
+  if (runs.length && !shown.length) $("#run-list").append(h("div", { class: "panel empty" }, [h("p", { text: "Không có lần chạy nào khớp bộ lọc." })]));
+}
+
+function runItem(r) {
+  const key = r.folder + "/" + r.id;
+  const open = state.expanded.has(key);
+  const head = h("button", { class: "run-head", type: "button", "aria-expanded": String(open), onclick: () => {
+    if (state.expanded.has(key)) state.expanded.delete(key); else state.expanded.add(key);
+    renderRuns();
+  } }, [
+    pill(r),
+    h("span", { class: "run-name" }, [h("b", { text: r.session }), h("span", { class: "muted", text: " · " + r.id })]),
+    h("span", { class: "strip hide-sm", "aria-hidden": "true" }, stripOf(r)),
+    h("span", { class: "num", text: r.passed + "/" + r.total + " bước" }),
+    h("span", { class: "muted num hide-sm", text: dur(r.running ? Date.now() - r.started : r.ms) }),
+    h("span", { class: "muted hide-sm", text: ago(r.started), title: fullTime(r.started) }),
+    h("span", { html: '<svg class="chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M9 6l6 6-6 6"/></svg>' }),
+  ]);
+  const err = r.failed && h("div", { class: "run-err" }, ["Bước " + r.failed.i + " ", h("b", { text: r.failed.label }), ": " + firstLine(r.failed.error)]);
+  const now = r.running && r.current && h("div", { class: "run-err", style: "color:var(--accent)" }, ["Đang làm bước " + r.current.i + ": ", h("b", { text: r.current.label })]);
+  return h("article", { class: "panel run" + (r.running ? " running" : r.failed ? " failed" : "") }, [head, err, now, open && runDetail(r)]);
+}
+
+// One square per planned step: done ones by result, the running one pulsing,
+// the rest (not reached, or skipped after a failure) grey.
+function stripOf(r) {
+  const cells = r.steps.map((s) => h("i", { class: s.ok ? "" : "bad", title: "#" + s.i + " " + s.label }));
+  for (let i = r.steps.length; i < r.total; i++) {
+    const current = r.running && r.current && r.current.i === i;
+    cells.push(h("i", { class: current ? "now" : "todo", title: "#" + i + (current ? " " + r.current.label : r.running ? " chưa chạy" : " không chạy") }));
+  }
+  return cells;
+}
+
+function thumbImg(thumb, full) {
+  const img = h("img", { src: thumb || full, alt: "", loading: "lazy", decoding: "async" });
+  if (thumb) img.addEventListener("error", () => { if (img.src.indexOf(full) < 0) img.src = full; }, { once: true });
+  return img;
+}
+
+function runDetail(r) {
+  const shots = r.steps.filter((s) => s.shot).map((s) => ({ title: "#" + s.i + " " + s.label, url: fileUrl(s.shot), kind: "image" }));
+  const links = h("div", { class: "links" }, [
+    r.report && h("a", { class: "btn", href: fileUrl(r.report), target: "_blank", rel: "noreferrer", text: "Mở báo cáo" }),
+    h("button", { class: "btn ghost", type: "button", text: "Thư mục evidence", onclick: () => go("files/" + enc(r.folder)) }),
+    h("span", { class: "muted", style: "align-self:center", text: fullTime(r.started) + (r.open ? " · session vẫn đang mở" : "") }),
+  ]);
+  const steps = r.steps.map((s) => {
+    const idx = shots.findIndex((x) => x.url === (s.shot && fileUrl(s.shot)));
+    const media = s.shot
+      ? h("button", { class: "shot", type: "button", "aria-label": "Xem lớn ảnh bước " + s.i, onclick: () => showGallery(shots, idx) },
+          [thumbImg(s.thumb && fileUrl(s.thumb), fileUrl(s.shot))])
+      : null;
+    return h("figure", { class: "step" + (s.ok ? "" : " bad") }, [
+      media,
+      h("figcaption", {}, [
+        h("div", { class: "lbl", text: "#" + s.i + " " + s.label }),
+        h("div", { class: "meta" }, [
+          h("span", { class: "pill " + (s.ok ? "ok" : "bad"), html: s.ok ? ICONS.check : ICONS.cross }, [s.ok ? "ĐẠT" : "LỖI"]),
+          h("span", { class: "num", text: dur(s.ms) }),
+          s.session && s.session !== r.session && h("span", { text: "session " + s.session }),
+        ]),
+        s.error && h("div", { class: "error", text: s.error }),
+      ]),
+    ]);
+  });
+  return h("div", { class: "run-detail" }, [links, h("div", { class: "steps" }, steps)]);
+}
+
+for (const b of $$("#run-filter button")) b.onclick = () => {
+  state.runFilter = b.dataset.v;
+  for (const x of $$("#run-filter button")) x.setAttribute("aria-pressed", String(x === b));
+  renderRuns();
+};
+$("#run-session").onchange = (e) => { state.runSession = e.target.value; renderRuns(); };
+
+/* ---------- Files ---------- */
+
+async function loadAssets() {
+  try {
+    state.assets = await api("/api/assets");
+    online(true);
+  } catch (e) {
+    online(false);
+    return;
+  }
+  renderFolders();
+  renderFolder();
+}
+
+const EXTERNAL = "__external__";
+
+function renderFolders() {
+  const a = state.assets;
+  const showEmpty = $("#show-empty").checked;
+  const folders = a.folders.filter((f) => showEmpty || f.files > 0 || f.session);
+  const total = a.folders.reduce((n, f) => n + f.size, 0);
+  $("#files-meta").textContent = a.root + " · " + a.folders.length + " thư mục · " + size(total);
+  if (!state.folder || (state.folder !== EXTERNAL && !a.folders.some((f) => f.name === state.folder))) {
+    state.folder = folders[0] ? folders[0].name : a.external.length ? EXTERNAL : null;
+  }
+  const items = [];
+  if (a.external.length) {
+    items.push(h("button", { class: "folder", type: "button", role: "listitem", "aria-current": String(state.folder === EXTERNAL), onclick: () => go("files/" + EXTERNAL) }, [
+      h("div", { class: "row" }, [h("span", { class: "fname", text: "Lưu ngoài thư mục evidence" })]),
+      h("div", { class: "fmeta", text: a.external.length + " file do tool ghi (ảnh, PDF, file tải về)" }),
+    ]));
+  }
+  for (const f of folders) {
+    const p = folderParts(f.name);
+    const meta = [f.files + " file", size(f.size), ago(f.mtime)];
+    if (f.failed) meta.push(f.failed + " ảnh lỗi");
+    items.push(h("button", { class: "folder", type: "button", role: "listitem", "aria-current": String(state.folder === f.name), title: f.name, onclick: () => go("files/" + enc(f.name)) }, [
+      h("div", { class: "row" }, [h("span", { class: "fname", text: p.session }), f.session && tag("Đang mở", "accent")]),
+      h("div", { class: "fmeta", text: meta.join(" · ") }),
+    ]));
+  }
+  const hidden = a.folders.length - folders.length;
+  if (hidden) items.push(h("div", { class: "folder fmeta", style: "cursor:default", text: "Đã ẩn " + hidden + " thư mục rỗng" }));
+  if (!items.length) items.push(h("div", { class: "empty", text: "Chưa có file nào" }));
+  $("#folder-list").replaceChildren(...items);
+}
+
+async function renderFolder() {
+  const box = $("#folder-content");
+  const a = state.assets;
+  if (!state.folder) {
+    box.replaceChildren(h("div", { class: "empty" }, [h("h2", { text: "Chưa có evidence" }), h("p", { text: "Ảnh từng bước, báo cáo, video và trace của các session sẽ nằm ở đây." })]));
+    return;
+  }
+  if (state.folder === EXTERNAL) {
+    box.replaceChildren(
+      h("div", { class: "content-head" }, [h("h2", { text: "Lưu ngoài thư mục evidence" })]),
+      fileGroups(a.external.map((f) => ({ ...f, name: f.path, url: extUrl(f.path), external: true }))),
+    );
+    return;
+  }
+  const folder = a.folders.find((f) => f.name === state.folder);
+  let files;
+  try {
+    files = (await api("/api/assets/" + enc(state.folder))).files;
+  } catch (e) {
+    box.replaceChildren(h("div", { class: "empty", text: e.message }));
+    return;
+  }
+  const p = folderParts(folder.name);
+  const head = h("div", { class: "content-head" }, [
+    h("div", {}, [h("h2", { text: p.session }), h("div", { class: "muted mono", text: folder.name })]),
+    folder.session && tag("Session đang mở", "accent"),
+    h("div", { class: "right" }, [
+      folder.hasReport && h("a", { class: "btn", href: fileUrl(folder.name + "/report.html"), target: "_blank", rel: "noreferrer", text: "Mở báo cáo" }),
+      h("button", { class: "btn ghost danger", type: "button", text: "Xoá thư mục", disabled: !!folder.session,
+        title: folder.session ? "Đóng session trước khi xoá thư mục" : null,
+        onclick: () => remove({ path: folder.name }, "thư mục " + folder.name) }),
+    ]),
+  ]);
+  const prefix = folder.name + "/";
+  box.replaceChildren(head, fileGroups(files.map((f) => ({ ...f, name: f.path.startsWith(prefix) ? f.path.slice(prefix.length) : f.path, url: fileUrl(f.path) }))));
+}
+
+function fileGroups(files) {
+  const wrap = h("div");
+  if (!files.length) {
+    wrap.append(h("div", { class: "empty", text: "Thư mục này chưa có file nào." }));
+    return wrap;
+  }
+  const images = files.filter((f) => f.kind === "image");
+  const gallery = images.map((f) => ({ title: f.name, url: f.url, kind: "image" }));
+  const byDir = new Map();
+  images.forEach((f, i) => {
+    const dir = f.name.includes("/") ? f.name.slice(0, f.name.lastIndexOf("/")) : "";
+    if (!byDir.has(dir)) byDir.set(dir, []);
+    byDir.get(dir).push([f, i]);
+  });
+  for (const [dir, list] of byDir) {
+    wrap.append(h("div", { class: "group" }, [
+      h("h3", { text: (dir || "Ảnh") + " · " + list.length }),
+      h("div", { class: "grid" }, list.map(([f, i]) => {
+        const base = f.name.slice(f.name.lastIndexOf("/") + 1);
+        return h("figure", { class: "tile" + (/FAILED/.test(base) ? " bad" : "") }, [
+          h("button", { type: "button", "aria-label": "Xem lớn " + base, onclick: () => showGallery(gallery, i) }, [thumbImg(f.thumb && (f.external ? null : fileUrl(f.thumb)), f.url)]),
+          h("figcaption", { title: f.name, text: base }),
+        ]);
+      })),
+    ]));
+  }
+  const others = files.filter((f) => f.kind !== "image");
+  if (others.length) {
+    const kinds = { video: "Video", report: "Báo cáo", trace: "Trace", har: "HAR", pdf: "PDF", other: "File" };
+    wrap.append(h("div", { class: "group" }, [
+      h("h3", { text: "File khác · " + others.length }),
+      h("div", { class: "rows" }, others.map((f) => h("div", { class: "frow" }, [
+        h("span", { class: "tag", text: kinds[f.kind] || "File" }),
+        f.kind === "video" || f.kind === "pdf" || f.kind === "report"
+          ? h("a", { class: "fn mono", href: "#", text: f.name, onclick: (e) => { e.preventDefault(); showFile(f); } })
+          : h("span", { class: "fn mono", text: f.name }),
+        h("span", { class: "muted num hide-sm", text: size(f.size) }),
+        h("span", { class: "muted hide-sm", text: ago(f.mtime), title: fullTime(f.mtime) }),
+        h("span", { class: "acts" }, [
+          h("a", { class: "btn icon ghost", href: f.url, target: "_blank", rel: "noreferrer", "aria-label": "Mở " + f.name, title: "Mở trong tab mới", html: ICONS.open }),
+          h("a", { class: "btn icon ghost", href: f.url + (f.url.includes("?") ? "&" : "?") + "download", "aria-label": "Tải " + f.name, title: "Tải về", html: ICONS.download }),
+          iconBtn("trash", "Xoá " + f.name, () => remove(f.external ? { external: f.path } : { path: f.path }, f.name), "danger"),
+        ]),
+      ]))),
+    ]));
+  }
+  return wrap;
+}
+
+async function remove(body, label) {
+  if (!confirm("Xoá " + label + "? Không khôi phục được.")) return;
+  try {
+    await api("/api/assets/delete", body);
+    toast("Đã xoá " + label);
+    loadAssets();
+  } catch (e) { toast(e.message, true); }
+}
+
+$("#show-empty").onchange = () => renderFolders();
+$("#prune").onclick = async () => {
+  const days = Number($("#prune-days").value);
+  const scope = days ? "không còn mở và cũ hơn " + days + " ngày" : "không thuộc session nào đang mở";
+  if (!confirm("Xoá mọi thư mục evidence " + scope + "?")) return;
+  try {
+    const r = await api("/api/assets/prune", { olderThanDays: days });
+    toast(r.removed.length ? "Đã xoá " + r.removed.length + " thư mục" : "Không có thư mục nào cần dọn");
+    loadAssets();
+  } catch (e) { toast(e.message, true); }
+};
+
+/* ---------- Viewer ---------- */
+
+const viewer = $("#viewer");
+$("#v-prev").innerHTML = ICONS.back;
+$("#v-next").innerHTML = ICONS.next;
+$("#v-close").innerHTML = ICONS.close;
+$("#v-close").onclick = () => viewer.close();
+viewer.addEventListener("close", () => { clearInterval(liveTimer); $("#v-body").replaceChildren(); });
+viewer.addEventListener("click", (e) => { if (e.target === viewer) viewer.close(); });
+let gallery = null;
+
+function showViewer(o) {
+  $("#v-title").textContent = o.title;
+  $("#v-body").replaceChildren(o.node);
+  const open = $("#v-open");
+  open.hidden = !o.open;
+  if (o.open) open.href = o.open;
+  const multi = gallery && gallery.items.length > 1;
+  $("#v-prev").hidden = $("#v-next").hidden = !multi;
+  $("#v-count").textContent = multi ? (gallery.i + 1) + " / " + gallery.items.length : "";
+  if (!viewer.open) viewer.showModal();
+}
+
+function showGallery(items, i) {
+  gallery = { items, i };
+  const it = items[i];
+  showViewer({ title: it.title, node: h("img", { src: it.url, alt: it.title }), open: it.url });
+}
+function step(d) {
+  if (!gallery || gallery.items.length < 2) return;
+  showGallery(gallery.items, (gallery.i + d + gallery.items.length) % gallery.items.length);
+}
+$("#v-prev").onclick = () => step(-1);
+$("#v-next").onclick = () => step(1);
+viewer.addEventListener("keydown", (e) => {
+  if (e.key === "ArrowLeft") step(-1);
+  if (e.key === "ArrowRight") step(1);
+});
+
+function showFile(f) {
+  gallery = null;
+  const node = f.kind === "video"
+    ? h("video", { src: f.url, controls: true, autoplay: true })
+    : h("iframe", { src: f.url, title: f.name, sandbox: "allow-popups allow-same-origin" });
+  showViewer({ title: f.name, node, open: f.url });
+}
+
+/* ---------- Updates ---------- */
+
+// One fetch in flight per kind; a change arriving meanwhile queues one more.
+function coalesce(load) {
+  let busy = false, again = false;
+  return async function run() {
+    if (busy) { again = true; return; }
+    busy = true;
+    try { await load(); } finally { busy = false; if (again) { again = false; run(); } }
+  };
+}
+const refreshSessions = coalesce(loadSessions);
+const refreshRuns = coalesce(loadRuns);
+// Re-listing files mid-flow would reload the grid on every step.
+let assetsAt = 0;
+function refreshAssets() {
+  if (Date.now() - assetsAt < 3000) return;
+  assetsAt = Date.now();
+  loadAssets();
+}
+
+// The server pushes a change whenever any instance opens or closes a session,
+// starts a flow, finishes a step or logs an error.
+let live = false;
+const events = new EventSource("/api/events");
+events.onopen = () => { live = true; online(true); };
+events.onerror = () => { live = false; online(false); };
+events.addEventListener("change", (e) => {
+  const what = JSON.parse(e.data);
+  online(true);
+  if (document.hidden) return;
+  if (what.runs) refreshRuns();
+  // Also off the session view: the nav count and a card's last run follow it.
+  if (what.sessions || what.runs) refreshSessions();
+  if (state.view === "files" && what.runs) refreshAssets();
+});
+
+route();
+refreshRuns();
+if (state.view !== "sessions") refreshSessions();
+// Tabs and URLs change without touching the store, so the session view still
+// re-reads slowly; live pictures follow their own pace.
+setInterval(() => {
+  if (document.hidden || viewer.open) return;
+  if (state.view === "sessions") refreshSessions();
+  if (!live) refreshRuns();
+}, 5000);
+setInterval(refreshShots, 500);
+document.addEventListener("visibilitychange", () => { if (!document.hidden) route(); });
 </script>
 </body>
 </html>`;

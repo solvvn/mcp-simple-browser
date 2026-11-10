@@ -4,7 +4,8 @@ import { clamp } from "./util.js";
 
 const time = (t: number) => new Date(t).toISOString().slice(11, 23);
 
-export function readConsole(session: Session, level: "all" | "error" | "warning", limit: number, clear: boolean) {
+export async function readConsole(session: Session, level: "all" | "error" | "warning", limit: number, clear: boolean) {
+  await session.syncConsole();
   const wanted = (type: string) =>
     level === "all" || (level === "error" ? /error/.test(type) : /error|warn/.test(type));
   const rows = session.consoleLog.filter((entry) => wanted(entry.type)).slice(-limit);
