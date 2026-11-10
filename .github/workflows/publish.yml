@@ -1,0 +1,73 @@
+name: Publish to npm
+
+# Two ways to release:
+#  - Actions tab > "Publish to npm" > Run workflow, pick patch/minor/major:
+#    bumps package.json, pushes the "x.y.z" commit and vX.Y.Z tag to main,
+#    then publishes. Works from a phone.
+#  - Locally: `npm version minor && git push --follow-tags`; the pushed tag
+#    publishes that version.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: Version bump
+        type: choice
+        options: [patch, minor, major]
+        default: patch
+
+concurrency:
+  group: publish
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # push the version commit and tag
+      id-token: write # npm trusted publishing and provenance
+    steps:
+      - name: Only release from main
+        if: github.event_name == 'workflow_dispatch' && github.ref != 'refs/heads/main'
+        run: |
+          echo "::error::Run this workflow on main (current: ${{ github.ref_name }})"
+          exit 1
+
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+          cache: yarn
+
+      # Trusted publishing (no token) needs npm 11.5.1 or later.
+      - run: npm install -g npm@latest
+
+      - run: yarn install --frozen-lockfile
+
+      - run: yarn typecheck
+
+      - name: Bump version
+        if: github.event_name == 'workflow_dispatch'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          npm version ${{ inputs.bump }} -m "%s"
+          git push origin HEAD:main --follow-tags
+
+      - name: Check tag matches package.json
+        if: github.event_name == 'push'
+        run: |
+          version=$(node -p "require('./package.json').version")
+          if [ "v$version" != "${{ github.ref_name }}" ]; then
+            echo "::error::Tag ${{ github.ref_name }} does not match package.json version $version"
+            exit 1
+          fi
+
+      - name: Publish
+        run: npm publish --provenance
+        env:
+          # Only used if trusted publishing is not set up on npmjs.com.
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

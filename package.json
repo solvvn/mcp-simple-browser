@@ -3,10 +3,6 @@
   "version": "2.4.0",
   "type": "module",
   "main": "dist/index.js",
-  "files": [
-    "dist",
-    "README.md"
-  ],
   "engines": {
     "node": ">=22.5"
   },
@@ -18,6 +14,18 @@
   },
   "bin": {
     "mcp-simple-browser": "dist/index.js"
+  },
+  "files": [
+    "dist"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/solvvn/mcp-simple-browser.git"
+  },
+  "homepage": "https://github.com/solvvn/mcp-simple-browser#readme",
+  "bugs": "https://github.com/solvvn/mcp-simple-browser/issues",
+  "publishConfig": {
+    "access": "public"
   },
   "scripts": {
     "build": "tsc",

@@ -183,6 +183,43 @@ browser_session { action: "open", id: "real", cdpUrl: "http://127.0.0.1:9222" }
 
 Closing that session only detaches; your Chrome and its tabs stay open.
 
+## Dashboard
+
+While the server runs it also serves a small web page at
+**http://127.0.0.1:9330/** (the URL is printed on stderr and returned by
+`browser_session { action: "list" }` as `ui`). Every instance on the machine
+shares one dashboard: the first to start serves it, the others stand by and
+take over within a few seconds when it exits. It updates live over
+server-sent events.
+
+- **Session**: every session any instance has open, with a live screenshot,
+  its tabs (click to switch), request and console-error counts, recording
+  state, and the progress of a running flow. Open a new session, navigate, go
+  back, reload, make one the default, write its report, or close it. Acting on
+  another instance's session waits for its lock, so it never drives a page an
+  agent is on.
+- **Run history**: recent flows from every session, with step thumbnails,
+  pass/fail and the step running right now.
+- **Assets**: the evidence folders under `BROWSER_EVIDENCE_DIR`, newest first,
+  with step screenshots grouped per run, failed steps marked, filters by type
+  and name, and a viewer for images, videos, PDFs and `report.html`. Download,
+  copy the path, delete a file or a closed session's folder, or prune all
+  closed folders older than N days. Files the tools saved elsewhere
+  (`filepath` outside the evidence dir, PDFs, downloads, storage state) are
+  listed under their own entry.
+
+| Variable | Effect |
+|---|---|
+| `BROWSER_UI=0` | Do not start the dashboard |
+| `BROWSER_UI_PORT=9400` | First port to try (default 9330); a port another program holds moves to the next, up to 10 |
+| `BROWSER_DB=/path/data.db` | Shared session store (default `~/.mcp-simple-browser/data.db`) |
+| `BROWSER_SESSION=name` | Name of this instance's default session (default `task-<random>`) |
+
+It listens on 127.0.0.1 only and has no login. Requests with a non-loopback
+`Host` are refused, and anything that changes state needs an `X-MCP-UI`
+header a cross-site page cannot send. It cannot delete or serve files outside
+the evidence dir, apart from the files the tools saved in this process.
+
 ## Evidence
 
 Every `browser_run_flow` writes a screenshot after each state-changing step to
@@ -613,6 +650,21 @@ yarn typecheck
 # Build
 yarn build
 ```
+
+## Releasing
+
+`.github/workflows/publish.yml` publishes to npm with provenance:
+
+- **From GitHub**: Actions → *Publish to npm* → *Run workflow* on `main`, pick
+  `patch`, `minor` or `major`. It bumps `package.json`, pushes the `x.y.z`
+  commit and `vX.Y.Z` tag, then publishes.
+- **From a terminal**: `npm version minor && git push --follow-tags`; the tag
+  triggers the publish.
+
+Authentication is npm trusted publishing: on npmjs.com, package *Settings* →
+*Trusted Publisher* → GitHub Actions, organization `solvvn`, repository
+`mcp-simple-browser`, workflow `publish.yml`. No token is needed. An
+`NPM_TOKEN` repository secret (an npm automation token) works as a fallback.
 
 ## License
 
