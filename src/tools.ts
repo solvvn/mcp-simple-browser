@@ -295,7 +295,10 @@ const tools = [
       filepath: z.string().optional().describe("Absolute path for the .png/.jpg. Default: the session's evidence dir"),
       fullPage: z.boolean().default(false).describe("Capture the whole scrollable page"),
       selector: z.string().optional().describe("Outline this element in the shot"),
-      label: z.string().optional().describe("Caption on the outline, e.g. what the element proves. Default: the selector"),
+      label: z
+        .string()
+        .optional()
+        .describe("Caption, e.g. what the shot proves. With selector: on the outline (default: the selector); without: a bar at the bottom with the URL and time. Use this rather than injecting a banner into the page"),
       crop: z.boolean().default(false).describe("Crop to the outlined element plus some context"),
     },
     handler: async ({ filepath, fullPage, selector, label, crop, session }) => {

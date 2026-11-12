@@ -1,7 +1,7 @@
-import { mkdir, writeFile } from "fs/promises";
+import { mkdir, readFile, writeFile } from "fs/promises";
 import { basename, dirname, join, relative, resolve, sep } from "path";
 import type { CDPSession } from "playwright-core";
-import type { MarkKind } from "./overlay.js";
+import type { CaptionFace, MarkKind } from "./overlay.js";
 import { EVIDENCE_ROOT } from "./session.js";
 import type { Page, Session } from "./session.js";
 import { insertRun, insertStep, loadRuns } from "./store.js";
@@ -135,10 +135,46 @@ async function thumbnail(page: Page, filepath: string, clip?: Box): Promise<void
   await writeFile(path, Buffer.from(data, "base64"));
 }
 
+const FONT_DIR = new URL("../assets/fonts/", import.meta.url);
+const LATIN = "U+0000-00FF,U+0131,U+0152-0153,U+02BB-02BC,U+02C6,U+02DA,U+02DC,U+0304,U+0308,U+0329,U+2000-206F,U+20AC,U+2122,U+2191,U+2193,U+2212,U+2215,U+FEFF,U+FFFD";
+const VIETNAMESE = "U+0102-0103,U+0110-0111,U+0128-0129,U+0168-0169,U+01A0-01A1,U+01AF-01B0,U+0300-0301,U+0303-0304,U+0308-0309,U+0323,U+0329,U+1EA0-1EF9,U+20AB";
+let captionFaces: CaptionFace[] | null | undefined;
+
+// Read once; a missing file only costs the captions their font.
+async function loadCaptionFaces(): Promise<CaptionFace[] | null> {
+  if (captionFaces !== undefined) return captionFaces;
+  try {
+    captionFaces = await Promise.all(
+      (["400", "600"] as const).flatMap((weight) => [
+        [weight, "latin", LATIN],
+        [weight, "vietnamese", VIETNAMESE],
+      ]).map(async ([weight, subset, unicodeRange]) => ({
+        data: (await readFile(new URL(`inter-${subset}-${weight}-normal.woff2`, FONT_DIR))).toString("base64"),
+        weight,
+        unicodeRange,
+      })),
+    );
+  } catch {
+    captionFaces = null;
+  }
+  return captionFaces;
+}
+
+// Each page gets the bytes once; later shots on it reuse the loaded faces.
+async function ensureCaptionFont(page: Page): Promise<void> {
+  if (await page.evaluate(() => window.__mcpOverlay?.fontReady() ?? true)) return;
+  const faces = await loadCaptionFaces();
+  if (faces) await page.evaluate((faces) => window.__mcpOverlay?.loadFont(faces), faces);
+}
+
 export async function screenshot(page: Page, filepath: string, options: ShotOptions = {}): Promise<string> {
   const { box, label, kind, fullPage = false, crop = false } = options;
+  if (box || label) await ensureCaptionFont(page).catch(() => {});
   if (box) {
     await page.evaluate(({ box, label, kind }) => window.__mcpOverlay?.highlight(box, label, kind), { box, label, kind }).catch(() => {});
+  } else if (label) {
+    const detail = `${new Date().toLocaleString("vi-VN")} · ${page.url()}`;
+    await page.evaluate(({ label, detail, kind }) => window.__mcpOverlay?.caption(label, detail, kind), { label, detail, kind }).catch(() => {});
   }
   try {
     const type = filepath.endsWith(".png") ? "png" : "jpeg";
