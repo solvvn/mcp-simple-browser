@@ -41,7 +41,7 @@ export const automationStepSchema = z
   .object({
     action: z.enum(ACTIONS).describe("Action to run"),
     session: z.string().optional().describe("Run this step in another session (auto-opened), e.g. a second user"),
-    name: z.string().optional().describe("Short description of what the step does, shown on its evidence screenshot, e.g. \"Đăng nhập bằng tài khoản admin\". Default: generated from the action and target"),
+    name: z.string().optional().describe("Short description of what the step does, shown on its evidence screenshot (on the outline, or in a bar with the URL and time when nothing is outlined), e.g. \"Đăng nhập bằng tài khoản admin\". Default: generated from the action and target. Use this rather than injecting a banner into the page"),
     selector: z.string().optional().describe("CSS/Playwright selector, or a snapshot ref like e5"),
     target: z.string().optional().describe("Drop target selector for drag"),
     frame: z.string().optional().describe("iframe selector to scope this step into"),

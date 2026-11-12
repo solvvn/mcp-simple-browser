@@ -3,10 +3,19 @@
 
 export type MarkKind = "action" | "assert" | "fail";
 
+export interface CaptionFace {
+  data: string;
+  weight: string;
+  unicodeRange: string;
+}
+
 declare global {
   interface Window {
     __mcpOverlay?: {
       highlight(rect: { x: number; y: number; width: number; height: number }, label?: string, kind?: MarkKind): void;
+      caption(text: string, detail: string, kind?: MarkKind): void;
+      fontReady(): boolean;
+      loadFont(faces: CaptionFace[]): Promise<void>;
       clear(): void;
     };
     __mcpVitals?: { lcp: number; cls: number; longTasks: number; longTaskMs: number };
@@ -33,8 +42,12 @@ export function overlayScript(): void {
     .box{--c:47,111,235;position:fixed;border:2px solid rgb(var(--c));background:rgba(var(--c),.07);border-radius:4px;pointer-events:none;box-sizing:border-box}
     .box.assert{--c:26,127,55}
     .box.fail{--c:207,34,46}
-    .tag{position:absolute;left:-2px;bottom:100%;max-width:520px;overflow:hidden;text-overflow:ellipsis;background:rgb(var(--c));color:#fff;font:600 12px/18px system-ui,sans-serif;padding:0 6px;border-radius:4px 4px 0 0;white-space:nowrap}
+    .tag{position:absolute;left:-2px;bottom:100%;max-width:520px;overflow:hidden;text-overflow:ellipsis;background:rgb(var(--c));color:#fff;font:600 12px/18px "mcp-caption",system-ui,sans-serif;font-feature-settings:"calt" 0;padding:0 6px;border-radius:4px 4px 0 0;white-space:nowrap}
     .tag.below{bottom:auto;top:100%;border-radius:0 0 4px 4px}
+    .cap{--c:47,111,235;position:fixed;left:0;right:0;bottom:0;background:rgba(17,20,24,.88);border-top:3px solid rgb(var(--c));color:#fff;padding:6px 12px 7px;font:600 14px/1.4 "mcp-caption",system-ui,-apple-system,"Segoe UI",Roboto,"Noto Sans",sans-serif;font-feature-settings:"calt" 0}
+    .cap.assert{--c:26,127,55}
+    .cap.fail{--c:207,34,46}
+    .cap small{display:block;font-weight:400;font-size:12px;color:rgba(255,255,255,.72);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
     @keyframes r{from{transform:scale(.2);opacity:1}to{transform:scale(1.5);opacity:0}}
   </style><canvas></canvas><svg class="cursor" viewBox="0 0 24 24"><path d="M3 2v17.5l4.6-4.1 3 6.6 3-1.3-3-6.5h6.2z" fill="#111" stroke="#fff" stroke-width="1.5" stroke-linejoin="round"/></svg>`;
   const canvas = root.querySelector("canvas")!;
@@ -157,9 +170,29 @@ export function overlayScript(): void {
   addEventListener("resize", resize);
   resize();
 
+  // Captions are set in Inter shipped with the server, so a shot reads the
+  // same on any machine. The faces live under their own family name and sit
+  // in document.fonts only while a caption is up, so the page under test
+  // neither picks them up nor sees them otherwise. Built from bytes, they need
+  // no fetch for a CSP to block.
+  let faces: FontFace[] = [];
+  const showFont = () => faces.forEach((face) => document.fonts.add(face));
+
   window.__mcpOverlay = {
+    fontReady() {
+      return faces.length > 0;
+    },
+    async loadFont(sources) {
+      const loaded = sources.map(({ data, weight, unicodeRange }) => {
+        const bytes = Uint8Array.from(atob(data), (c) => c.charCodeAt(0));
+        return new FontFace("mcp-caption", bytes, { weight, unicodeRange });
+      });
+      await Promise.all(loaded.map((face) => face.load()));
+      faces = loaded;
+    },
     highlight(rect, label, kind = "action") {
       mount();
+      showFont();
       // Padded so the outline does not sit on the element's own border or text.
       const pad = 4;
       const top = rect.y - pad;
@@ -169,13 +202,28 @@ export function overlayScript(): void {
       if (label) {
         const tag = document.createElement("div");
         tag.className = top < 20 ? "tag below" : "tag";
-        tag.textContent = label;
+        tag.textContent = label.normalize("NFC");
         box.appendChild(tag);
       }
       root.appendChild(box);
     },
+    // A step with nothing to outline still says what it shows. Decomposed
+    // text (as macOS file names give) loses its stacked Vietnamese marks in
+    // many fonts, so it is composed first.
+    caption(text, detail, kind = "action") {
+      mount();
+      showFont();
+      const bar = document.createElement("div");
+      bar.className = `cap ${kind}`;
+      bar.textContent = text.normalize("NFC");
+      const line = document.createElement("small");
+      line.textContent = detail.normalize("NFC");
+      bar.appendChild(line);
+      root.appendChild(bar);
+    },
     clear() {
-      root.querySelectorAll(".box, .mark, .ripple").forEach((el) => el.remove());
+      root.querySelectorAll(".box, .cap, .mark, .ripple").forEach((el) => el.remove());
+      faces.forEach((face) => document.fonts.delete(face));
     },
   };
   Object.defineProperty(window, "__mcpOverlay", { enumerable: false });
